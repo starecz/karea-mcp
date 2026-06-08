@@ -1,0 +1,44 @@
+name: karea
+displayName: Karea Task Manager
+description: 44 tools so Claude Code, Cursor, and other MCP clients can manage your dev tasks (create, edit, close, recap, link to Jira, attach resources).
+publisher: starecz
+homepage: https://karea.app
+repository: git+https://github.com/starecz/karea-mcp.git
+license: MIT
+categories:
+  - productivity
+  - task-management
+  - developer-tools
+keywords:
+  - tasks
+  - todo
+  - claude-code
+  - cursor
+  - project-management
+  - jira
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - kareaApiKey
+    properties:
+      kareaApiKey:
+        type: string
+        title: Karea API Key
+        description: Generate yours at https://karea.app/dashboard/settings/api-keys
+        format: password
+      kareaUrl:
+        type: string
+        title: Karea Base URL
+        description: Defaults to the hosted service. Override only if self-hosting.
+        default: https://karea.app
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', 'karea-mcp'],
+      env: {
+        KAREA_API_KEY: config.kareaApiKey,
+        KAREA_URL: config.kareaUrl || 'https://karea.app'
+      }
+    })

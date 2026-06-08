@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.starecz/karea-mcp",
+  "description": "Karea task manager MCP server - 44 tools so Claude Code, Cursor, and other MCP clients can create, edit, close, and recap your dev tasks while you code.",
+  "status": "active",
+  "repository": {
+    "url": "git+https://github.com/starecz/karea-mcp.git",
+    "source": "github"
+  },
+  "version": "0.4.1",
+  "websiteUrl": "https://karea.app",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "karea-mcp",
+      "version": "0.4.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "KAREA_API_KEY",
+          "description": "Your Karea API key. Generate at https://karea.app/dashboard/settings/api-keys",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "KAREA_URL",
+          "description": "Karea base URL. Defaults to https://karea.app for the hosted service.",
+          "isRequired": false,
+          "default": "https://karea.app"
+        }
+      ]
+    }
+  ]
+}
