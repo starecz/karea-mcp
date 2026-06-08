@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "karea": {
+      "command": "npx",
+      "args": ["-y", "karea-mcp"],
+      "env": {
+        "KAREA_API_KEY": "${KAREA_API_KEY}",
+        "KAREA_URL": "https://karea.app"
+      }
+    }
+  }
+}
