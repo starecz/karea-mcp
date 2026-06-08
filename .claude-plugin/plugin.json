@@ -1,0 +1,15 @@
+{
+  "name": "karea",
+  "displayName": "Karea",
+  "version": "0.4.1",
+  "description": "Task manager for Claude Code. 44 MCP tools to create, edit, close, recap, and link your dev tasks while you code.",
+  "author": {
+    "name": "starecz",
+    "url": "https://github.com/starecz"
+  },
+  "homepage": "https://karea.app",
+  "repository": "https://github.com/starecz/karea-mcp",
+  "license": "MIT",
+  "category": "productivity",
+  "keywords": ["tasks", "todo", "project-management", "jira", "productivity"]
+}
