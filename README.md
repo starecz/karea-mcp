@@ -4,6 +4,7 @@ The MCP server for [Karea](https://karea.app). <!-- SYNC:TOOL_COUNT -->44<!-- /S
 
 [![npm](https://img.shields.io/npm/v/karea-mcp.svg)](https://www.npmjs.com/package/karea-mcp)
 [![license](https://img.shields.io/npm/l/karea-mcp.svg)](https://github.com/starecz/karea-mcp/blob/main/LICENSE)
+[![karea-mcp MCP server](https://glama.ai/mcp/servers/starecz/karea-mcp/badges/score.svg)](https://glama.ai/mcp/servers/starecz/karea-mcp)
 
 ## What you can do with it
 
