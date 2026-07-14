@@ -39,6 +39,41 @@ async function resolveProject(nameOrId?: string): Promise<string | undefined> {
   return karea.resolveProjectId(nameOrId)
 }
 
+// KA367: shared session-link params. Any task-referencing tool that accepts
+// these will atomically link the AI session to the target task after the
+// primary operation succeeds. Best-effort — link failures never block or
+// alter the primary tool's response.
+const AI_PROVIDERS = ['claude-code', 'opencode', 'codex', 'cursor', 'aider', 'other'] as const
+const sessionLinkFields = {
+  aiSessionId: z.string().optional().describe('Optional: your current AI CLI session ID. When paired with toolType, atomically links this session to the affected task (equivalent to calling karea_link_session, but saves the round-trip). For Claude Code use the id from `claude --resume`.'),
+  toolType: z.enum(AI_PROVIDERS).optional().describe('Optional: your AI provider ("claude-code" / "opencode" / "codex" / "cursor" / "aider" / "other"). Required when aiSessionId is supplied.'),
+  sessionLabel: z.string().optional().describe('Optional short label for the linked session (e.g. "Feature draft").'),
+}
+
+async function maybeLinkSession(
+  taskRef: string | undefined,
+  params: { aiSessionId?: string; toolType?: string; sessionLabel?: string },
+): Promise<string | null> {
+  if (!params.aiSessionId || !params.toolType || !taskRef) return null
+  try {
+    // Resolve visual ID / title to a real UUID before hitting the sessions API.
+    let taskId = taskRef
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)) {
+      const t = await karea.getTask(taskRef)
+      taskId = t.id
+    }
+    await karea.linkAISession(taskId, {
+      provider: params.toolType,
+      sessionId: params.aiSessionId,
+      label: params.sessionLabel,
+    })
+    return ` Linked ${params.toolType} session ${params.aiSessionId}.`
+  } catch {
+    // Silent — session linking is a convenience, not a hard requirement.
+    return null
+  }
+}
+
 // List projects
 server.tool('karea_list_projects', 'List all Karea projects with their IDs', {}, async () => {
   const projects = await karea.listProjects()
@@ -91,19 +126,20 @@ server.tool('karea_list_tasks', 'List tasks in a project. Defaults to open tasks
 })
 
 // Create task
-server.tool('karea_create_task', 'Create a new task', {
+server.tool('karea_create_task', 'Create a new task in a project and return it with its visual ID (e.g. KA42), status, priority and category. Defaults when omitted: status open, priority 3, the first category of the project. Use karea_quick_task to log something already finished, or karea_doing for work in progress.', {
   name: z.string().describe('Task title'),
   category: z.string().optional().describe('Category name'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
-  description: z.string().optional().describe('Task description (short, one line)'),
+  description: z.string().optional().describe('Task description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short (a few sentences); use `markdown` for long-form docs.'),
   markdown: z.string().optional().describe('Long-form markdown content — use for investigation findings, technical/functional docs, solution design, root cause analysis. This is the task\'s knowledge base.'),
   source: z.string().optional().describe('Where this task came from'),
-  closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing'),
-  tags: z.array(z.string()).optional().describe('Tags to add (e.g. ["bug", "needs review", "urgent"])'),
+  closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing. Keep each one short and concrete - 1 short sentence, ideally under ~120 chars (e.g. "Tests pass in CI", "PR approved"). Do NOT write paragraphs.'),
+  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (verify with karea_view_task or the project list). Do NOT invent new tags unless the user explicitly asked for one — a typo or a paraphrase spawns duplicate tags. When unsure, omit and ask the user.'),
   parentId: z.string().optional().describe('Parent task ID to create this as a subtask'),
   jiraIssueKey: z.string().optional().describe('JIRA issue key to link (e.g. PROJ-123). Issue must exist in JIRA.'),
   projectId: z.string().optional().describe('Project name or ID'),
+  ...sessionLinkFields,
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
 
@@ -136,28 +172,32 @@ server.tool('karea_create_task', 'Create a new task', {
     }
   }
 
-  const parts = [result.response || 'Task created.']
+  // KA367: atomic session link when caller supplies aiSessionId+toolType.
+  const linkNote = await maybeLinkSession(result.taskId, params)
+
+  const parts = [(result.response || 'Task created.') + (linkNote || '')]
   parts.push(...recordFooter('task', { id: result.taskId, displayId: result.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
 // Edit task
-server.tool('karea_edit_task', 'Edit an existing task', {
+server.tool('karea_edit_task', 'Update fields of an existing task (title, status, priority, deadline, category, assignee, description, tags, or add a note) located by visual ID, name or UUID. Only the fields you pass change; the rest are left untouched. Returns the updated task.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   name: z.string().optional().describe('New task title (rename the task)'),
   priority: z.number().min(1).max(5).optional().describe('New priority'),
   status: z.string().optional().describe('New status: open, in_progress, blocked, review, done'),
   sla: z.string().optional().describe('New deadline'),
-  description: z.string().optional().describe('New description (short, one line)'),
+  description: z.string().optional().describe('New description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short (a few sentences); use `markdown` for long-form docs.'),
   markdown: z.string().optional().describe('Long-form markdown content — use for investigation findings, technical/functional docs, solution design, root cause analysis. Overwrites existing markdown; read first with karea_get_markdown to append.'),
   category: z.string().optional().describe('Move to category'),
-  note: z.string().optional().describe('Add a note'),
-  tags: z.array(z.string()).optional().describe('Tags to add (e.g. ["bug", "needs review"])'),
+  note: z.string().optional().describe('Add a human-readable note (the user reads these). Markdown is supported (lists, **bold**, `code`, links) - use it when it makes the note more readable; plain text is also fine. For private AI cross-session working memory use karea_set_context instead.'),
+  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (check karea_view_task first). Do NOT invent new tags unless the user explicitly asked for one — the API upserts by name and typos create duplicates. When unsure, omit and ask.'),
   clearTags: z.boolean().optional().describe('Remove all existing tags before adding new ones'),
-  closingRequisites: z.array(z.string()).optional().describe('Closing requisites to add'),
+  closingRequisites: z.array(z.string()).optional().describe('Closing requisites to add. Keep each short and concrete - 1 short sentence, ideally under ~120 chars. Do NOT write paragraphs.'),
   clearClosingRequisites: z.boolean().optional().describe('Remove all existing closing requisites before adding new ones'),
   jiraIssueKey: z.string().optional().describe('JIRA issue key to link (e.g. PROJ-123). Set to "unlink" to remove.'),
   projectId: z.string().optional().describe('Project name or ID'),
+  ...sessionLinkFields,
 }, async (params) => {
   let cmd = `/et ${q(params.task)}`
   if (params.priority) cmd += ` -prio ${params.priority}`
@@ -171,30 +211,42 @@ server.tool('karea_edit_task', 'Edit an existing task', {
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(cmd, pid)
 
+  // The /et command above only knows about parent-level fields. Everything
+  // below (markdown, rename, notes, requisites, JIRA) is applied through
+  // separate API calls AFTER that response was composed — track those ops so
+  // the final message reflects them instead of echoing a stale "no changes"
+  // and tricking callers into retrying (KA343).
+  const childOps: string[] = []
+
   if (params.markdown) {
     await karea.setMarkdown(params.task, params.markdown, pid)
+    childOps.push('markdown set')
   }
 
   const taskId = result.taskId || params.task
   if (params.name) {
     await karea.updateTask(taskId, { title: params.name })
-    result.response = (result.response ? result.response + ' ' : '') + `Renamed to "${params.name}".`
+    childOps.push(`renamed to "${params.name}"`)
   }
   if (params.note) {
     const taskData = await karea.getTask(taskId)
     await karea.addNote(taskData.id, params.note)
+    childOps.push('added 1 note')
   }
   if (params.clearClosingRequisites) {
     const taskData = await karea.getTask(taskId)
+    const cleared = (taskData.closingRequisites || []).length
     for (const r of (taskData.closingRequisites || [])) {
       await karea.deleteRequisite(taskData.id, r.id)
     }
+    if (cleared > 0) childOps.push(`cleared ${cleared} closing requisite(s)`)
   }
   if (params.closingRequisites?.length) {
     const taskData = result.taskId ? await karea.getTask(result.taskId) : await karea.getTask(taskId)
     for (const desc of params.closingRequisites) {
       await karea.addRequisite(taskData.id, desc)
     }
+    childOps.push(`added ${params.closingRequisites.length} closing requisite(s)`)
   }
   if (params.jiraIssueKey) {
     const resolvedId = result.taskId || taskId
@@ -202,39 +254,74 @@ server.tool('karea_edit_task', 'Edit an existing task', {
     try {
       if (params.jiraIssueKey.toLowerCase() === 'unlink') {
         await karea.unlinkJira(taskData.id)
-        result.response += ' JIRA link removed.'
+        childOps.push('JIRA link removed')
       } else {
         await karea.linkJira(taskData.id, params.jiraIssueKey)
-        result.response += ` Linked to JIRA ${params.jiraIssueKey}.`
+        childOps.push(`linked to JIRA ${params.jiraIssueKey}`)
       }
     } catch (err: any) {
-      result.response += ` (JIRA link failed: ${err.message})`
+      childOps.push(`JIRA link failed: ${err.message}`)
     }
   }
 
-  const parts = [result.response || 'Task updated.']
+  let response = result.response || 'Task updated.'
+  if (childOps.length > 0) {
+    const opsText = childOps.join(', ')
+    // The /et reply legitimately says "(no changes)" when only child-level
+    // params were passed — replace it with what actually happened.
+    if (response.includes('(no changes)')) {
+      response = response.replace('(no changes)', `(${opsText})`)
+    } else if (/updated \(([^)]*)\)/.test(response)) {
+      response = response.replace(/updated \(([^)]*)\)/, (_m, existing) => `updated (${existing}, ${opsText})`)
+    } else {
+      response += ` Also: ${opsText}.`
+    }
+    // The embedded task card was rendered BEFORE the child writes — patch its
+    // note/requisite counts from a post-write fetch so callers don't see
+    // requisiteCount:0 for rows that were just persisted.
+    const cardMatch = response.match(/@@KAREA_VIEW@@(\{.*\})/)
+    if (cardMatch) {
+      try {
+        const fresh = await karea.getTask(taskId)
+        const card = JSON.parse(cardMatch[1])
+        if (card?.data) {
+          if (Array.isArray(fresh.notes)) card.data.noteCount = fresh.notes.length
+          if (Array.isArray(fresh.closingRequisites)) card.data.requisiteCount = fresh.closingRequisites.length
+          if (params.name) card.data.title = params.name
+          response = response.replace(cardMatch[0], `@@KAREA_VIEW@@${JSON.stringify(card)}`)
+        }
+      } catch { /* card patch is best-effort */ }
+    }
+  }
+
+  // KA367
+  const linkNote = await maybeLinkSession(result.taskId || params.task, params)
+
+  const parts = [response + (linkNote || '')]
   parts.push(...recordFooter('task', { id: result.taskId, displayId: result.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
 // Close task
-server.tool('karea_close_task', 'Mark a task as done', {
+server.tool('karea_close_task', 'Mark a task as done: sets status to done and stamps the close time. Reports any unmet closing requisites first unless confirm is set. To close several tasks at once use karea_done.', {
   task: z.string().describe('Task name, visual ID, or UUID'),
   resolution: z.string().optional().describe('How it was resolved'),
   projectId: z.string().optional().describe('Project name or ID'),
+  ...sessionLinkFields,
 }, async (params) => {
   let cmd = `/ct ${q(params.task)}`
   if (params.resolution) cmd += ` -r ${q(params.resolution)}`
 
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(cmd, pid)
-  const parts = [result.response || 'Task closed.']
+  const linkNote = await maybeLinkSession(result.taskId || params.task, params)
+  const parts = [(result.response || 'Task closed.') + (linkNote || '')]
   parts.push(...recordFooter('task', { id: result.taskId, displayId: result.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
 // Delete task
-server.tool('karea_delete_task', 'Delete a task (requires confirmation)', {
+server.tool('karea_delete_task', 'Permanently delete a task and its history. Irreversible; requires confirm=true. To merely close a task instead, use karea_close_task.', {
   task: z.string().describe('Task name, visual ID, or UUID'),
   confirm: z.boolean().optional().describe('Set true to confirm deletion'),
   projectId: z.string().optional().describe('Project name or ID'),
@@ -250,17 +337,19 @@ server.tool('karea_delete_task', 'Delete a task (requires confirmation)', {
 })
 
 // Quick task (did)
-server.tool('karea_quick_task', 'Log something you already did', {
+server.tool('karea_quick_task', 'Log something you already finished as a done task (it shows up in Recap) and return it. Status is always done; relative-time params set when it happened. For in-progress work use karea_doing instead.', {
   description: z.string().describe('What you did'),
   source: z.string().optional().describe('Where it happened'),
   projectId: z.string().optional().describe('Project name or ID'),
+  ...sessionLinkFields,
 }, async (params) => {
   let cmd = `/did ${q(params.description)}`
   if (params.source) cmd += ` -s ${q(params.source)}`
 
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(cmd, pid)
-  const parts = [result.response || 'Logged.']
+  const linkNote = await maybeLinkSession(result.taskId, params)
+  const parts = [(result.response || 'Logged.') + (linkNote || '')]
   parts.push(...recordFooter('task', { id: result.taskId, displayId: result.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
@@ -272,6 +361,7 @@ server.tool('karea_doing', 'Create a task you are working on right now (status: 
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
   projectId: z.string().optional().describe('Project name or ID'),
+  ...sessionLinkFields,
 }, async (params) => {
   let cmd = `/doing ${q(params.description)}`
   if (params.category) cmd += ` -cat ${q(params.category)}`
@@ -280,15 +370,17 @@ server.tool('karea_doing', 'Create a task you are working on right now (status: 
 
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(cmd, pid)
-  const parts = [result.response || 'Task created as in-progress.']
+  const linkNote = await maybeLinkSession(result.taskId, params)
+  const parts = [(result.response || 'Task created as in-progress.') + (linkNote || '')]
   parts.push(...recordFooter('task', { id: result.taskId, displayId: result.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
 // View task details
-server.tool('karea_view_task', 'View full details of a task', {
+server.tool('karea_view_task', 'Return one task with all its details (status, priority, deadline, category, description, notes, requisites, links), located by visual ID, name or UUID. Pass includeContext=true to also inline the task\'s AI Context in the response — avoids a follow-up karea_get_context round-trip. Read-only.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
+  includeContext: z.boolean().optional().describe('If true, inline the task\'s AI Context (cross-session working memory) in this response. Default false; when false, the response instead hints that Context exists and can be fetched with karea_get_context.'),
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(`/vt ${q(params.task)}`, pid)
@@ -311,6 +403,21 @@ server.tool('karea_view_task', 'View full details of a task', {
         })
         response += `\n\nLinked Resources (${links.length}):\n${lines.join('\n')}`
       }
+      if ((taskData as any).aiContext) {
+        if (params.includeContext) {
+          // Inline the context so the caller doesn't need a second round-trip.
+          try {
+            const ctx = await karea.getContext(params.task, pid)
+            const body = (ctx && ctx.context) ? ctx.context : (taskData as any).aiContext
+            response += `\n\nAI Context:\n${body}`
+          } catch {
+            // Fall back to the aiContext value we already have.
+            response += `\n\nAI Context:\n${(taskData as any).aiContext}`
+          }
+        } else {
+          response += `\n\nThis task has AI Context (your cross-session working memory). Fetch it with karea_get_context, or re-call karea_view_task with includeContext=true.`
+        }
+      }
     } catch {
       // ignore — keep the original response
     }
@@ -322,7 +429,7 @@ server.tool('karea_view_task', 'View full details of a task', {
 })
 
 // Create project
-server.tool('karea_create_project', 'Create a new project', {
+server.tool('karea_create_project', 'Create a new Karea project owned by you and seed it with the default categories (Coding, Testing, Documenting, Reviewing). Returns the new project id. To add a category to an existing project, use karea_create_category instead.', {
   name: z.string().describe('Project name'),
 }, async ({ name }) => {
   const result = await karea.sendCommand(`/np ${q(name)}`)
@@ -332,7 +439,7 @@ server.tool('karea_create_project', 'Create a new project', {
 })
 
 // Delete project
-server.tool('karea_delete_project', 'Delete a project', {
+server.tool('karea_delete_project', 'Permanently delete a project and everything inside it (tasks, categories, notes, history). Irreversible; requires confirm=true.', {
   name: z.string().describe('Project name'),
   confirm: z.boolean().optional().describe('Set true to confirm deletion'),
 }, async ({ name, confirm }) => {
@@ -343,7 +450,7 @@ server.tool('karea_delete_project', 'Delete a project', {
 })
 
 // Create category
-server.tool('karea_create_category', 'Create a new category in the current project', {
+server.tool('karea_create_category', 'Create a new category (a task bucket) inside an existing project and return it. To create a whole project, use karea_create_project.', {
   name: z.string().describe('Category name'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async ({ name, projectId }) => {
@@ -356,7 +463,7 @@ server.tool('karea_create_category', 'Create a new category in the current proje
 })
 
 // Delete category
-server.tool('karea_delete_category', 'Delete a category', {
+server.tool('karea_delete_category', 'Permanently delete a category AND every task inside it, including history. Irreversible; requires confirm=true. To delete a single task instead, use karea_delete_task.', {
   name: z.string().describe('Category name'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async ({ name, projectId }) => {
@@ -366,7 +473,7 @@ server.tool('karea_delete_category', 'Delete a category', {
 })
 
 // Bulk close tasks
-server.tool('karea_done', 'Mark multiple tasks as done at once', {
+server.tool('karea_done', 'Mark several tasks as done in one call, each given by visual ID or name; returns a per-task result. For a single task with closing-requisite checks, use karea_close_task.', {
   tasks: z.array(z.string()).describe('Task names or visual IDs to close'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async ({ tasks, projectId }) => {
@@ -379,7 +486,7 @@ server.tool('karea_done', 'Mark multiple tasks as done at once', {
 })
 
 // Share project
-server.tool('karea_share_project', 'Share a project with another user', {
+server.tool('karea_share_project', 'Give another user access to a project by email at a chosen role (owner, editor, commenter or viewer). Records the share so that user can see and, per role, edit the project.', {
   project: z.string().describe('Project name'),
   email: z.string().describe('User email to share with'),
   role: z.enum(['owner', 'editor', 'viewer']).optional().describe('Role to assign (default: editor)'),
@@ -391,7 +498,7 @@ server.tool('karea_share_project', 'Share a project with another user', {
 })
 
 // Ask AI
-server.tool('karea_ask', 'Send a natural language message to Karea AI', {
+server.tool('karea_ask', 'Send a natural-language request to the Karea AI assistant, which may read or modify your tasks to carry it out, and return its reply. Consumes your monthly AI usage allowance.', {
   message: z.string().describe('Your message'),
   projectId: z.string().optional().describe('Project name or ID for context'),
 }, async (params) => {
@@ -401,7 +508,7 @@ server.tool('karea_ask', 'Send a natural language message to Karea AI', {
 })
 
 // Recap
-server.tool('karea_recap', 'Get a recap of recent activity', {
+server.tool('karea_recap', 'Return a summary of recent activity (tasks created, closed and updated) over a recent time window. Read-only; handy for standups and reviews.', {
   hours: z.number().optional().describe('Hours to look back (default 24)'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async (params) => {
@@ -473,14 +580,52 @@ server.tool('karea_set_markdown', 'Write the markdown document for a task. Overw
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   markdown: z.string().describe('The full markdown content to store on the task. Pass empty string to clear.'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
-}, async ({ task, markdown, projectId }) => {
+  ...sessionLinkFields,
+}, async (params) => {
+  const { task, markdown, projectId } = params
   const pid = await resolveProject(projectId)
   const data = await karea.setMarkdown(task, markdown, pid)
-  return { content: [{ type: 'text', text: `Updated markdown on "${data.title}" (${(data.markdown || '').length} chars).` }] }
+  const linkNote = await maybeLinkSession(data.id || task, params)
+  return { content: [{ type: 'text', text: `Updated markdown on "${data.title}" (${(data.markdown || '').length} chars).${linkNote || ''}` }] }
+})
+
+// Read task Context — the AI-facing cross-session scratchpad.
+server.tool('karea_get_context', 'Read the task\'s Context — titled entries of AI working memory that hold the FULL HISTORY of a task (not just its current state): what was tried, decided, discovered, and abandoned along the way. ALWAYS read this first when picking a task up so you inherit the journey instead of re-deriving it. Each entry shows who/when/how (user or mcp) it was created and last edited. When you learn something new, ADD to the relevant entry with karea_set_context — do not overwrite the history. Distinct from notes (human-readable updates) and the markdown doc (long-form documentation).', {
+  task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
+  projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
+}, async ({ task, projectId }) => {
+  const pid = await resolveProject(projectId)
+  const data = await karea.getContext(task, pid)
+  const entries = Array.isArray(data.entries) ? data.entries : []
+  if (entries.length === 0) {
+    return { content: [{ type: 'text', text: `# Context: ${data.title}\n\n${data.context || '(empty — write your plan/findings here with karea_set_context)'}` }] }
+  }
+  const parts = entries.map((e: any) =>
+    `## ${e.title}  [${e.lastEditedMode || e.createdMode}, updated ${e.updatedAt ? new Date(e.updatedAt).toISOString().slice(0, 16).replace('T', ' ') : '?'}${e.lastEditedBy ? ` by ${e.lastEditedBy}` : ''}]\n\n${e.content}`)
+  return { content: [{ type: 'text', text: `# Context: ${data.title} (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})\n\n${parts.join('\n\n---\n\n')}` }] }
+})
+
+// Write task Context — upserts a titled entry of the AI scratchpad.
+server.tool('karea_set_context', 'Write a titled entry of the task\'s Context — the AI-facing cross-session working memory. Context tracks the FULL HISTORY of a task, not just its current state: what was tried, what worked, what failed, what was decided and why. Update incrementally so the journey is preserved (never overwrite the whole entry with "current status" — read first with karea_get_context, append/refine, then write back). Context is your DEFAULT save target: after every plan, finding, decision, or gotcha, persist it here proactively under titles like "Plan", "Findings", "Decisions", "Gotchas", "Attempted". Upserts by title: same title overwrites THAT entry only; other entries are untouched. Pass empty context to delete the entry. Use karea_add_note only for human-facing updates and karea_set_markdown for long-form docs — but keep Context up to date either way.', {
+  task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
+  context: z.string().describe('The full content for this entry. Pass empty string to delete the entry.'),
+  title: z.string().optional().describe('Entry title (e.g. "Plan", "Findings", "Decisions"). Defaults to "General".'),
+  projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
+  ...sessionLinkFields,
+}, async (params) => {
+  const { task, context, title, projectId } = params
+  const pid = await resolveProject(projectId)
+  const data = await karea.setContext(task, context, pid, title)
+  const linkNote = await maybeLinkSession(data.id || task, params)
+  if (data.deleted) {
+    return { content: [{ type: 'text', text: `Deleted Context entry "${data.entryTitle}" on "${data.title}".${linkNote || ''}` }] }
+  }
+  const e = data.entry
+  return { content: [{ type: 'text', text: `Updated Context entry "${e?.title || title || 'General'}" on "${data.title}" (${(e?.content || '').length} chars).${linkNote || ''}` }] }
 })
 
 // List open questions
-server.tool('karea_list_questions', 'List open questions in a project', {
+server.tool('karea_list_questions', 'List open questions (unresolved decisions or blockers) in a project, newest first. Defaults to status open; pass status to include answered, cancelled or all. Read-only.', {
   projectId: z.string().optional().describe('Project name or ID'),
   status: z.string().optional().describe('Filter by status: open, answered, cancelled, all (default: all)'),
 }, async ({ projectId, status }) => {
@@ -489,7 +634,11 @@ server.tool('karea_list_questions', 'List open questions in a project', {
   if (!data.length) return { content: [{ type: 'text', text: 'No questions found.' }] }
 
   const lines = data.map((q: any) => {
-    let line = `[${q.status}] ${q.question}\n  ID: ${q.id}`
+    const prefix = q.project?.prefix
+    const shortId = q.seq != null ? (prefix ? `${prefix}Q${q.seq}` : `Q${q.seq}`) : null
+    let line = `[${q.status}] ${q.question}`
+    if (shortId) line += `\n  Short ID: ${shortId}`
+    line += `\n  ID: ${q.id}`
     if (q.answer) line += `\n  Answer: ${q.answer}`
     if (q.tasks?.length) line += `\n  Linked: ${q.tasks.map((t: any) => t.task?.title || t.title).join(', ')}`
     return line
@@ -498,7 +647,7 @@ server.tool('karea_list_questions', 'List open questions in a project', {
 })
 
 // Create open question
-server.tool('karea_create_question', 'Create a new open question', {
+server.tool('karea_create_question', 'Create an open question (a decision or blocker to resolve) in a project, optionally linked to tasks, and return it with its short ID (e.g. KAQ3).', {
   question: z.string().describe('The question text'),
   projectId: z.string().optional().describe('Project name or ID'),
   markdown: z.string().optional().describe('Markdown body with additional context'),
@@ -509,14 +658,16 @@ server.tool('karea_create_question', 'Create a new open question', {
   const result = await karea.createQuestion({ projectId: pid, question: params.question, markdown: params.markdown, taskIds: params.taskIds })
   const parts = [`Question created: "${params.question}"`]
   const base = (process.env.KAREA_URL || 'http://localhost:3002').replace(/\/$/, '')
+  const qPrefix = result?.project?.prefix
+  if (result?.seq != null) parts.push(`Short ID: ${qPrefix ? `${qPrefix}Q${result.seq}` : `Q${result.seq}`}`)
   if (result?.id) parts.push(`ID: ${result.id}`)
   parts.push(`Link: ${base}/dashboard/questions`)
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
 // Answer a question
-server.tool('karea_answer_question', 'Answer an open question', {
-  questionId: z.string().describe('Question UUID'),
+server.tool('karea_answer_question', 'Answer an open question, located by short ID or text match: sets its answer and flips its status to answered. Returns the updated question.', {
+  questionId: z.string().describe('Question UUID or short ID (e.g. KAQ3)'),
   answer: z.string().describe('The answer'),
 }, async ({ questionId, answer }) => {
   await karea.updateQuestion(questionId, { answer, status: 'answered' })
@@ -524,8 +675,8 @@ server.tool('karea_answer_question', 'Answer an open question', {
 })
 
 // Edit a question
-server.tool('karea_edit_question', 'Edit an open question', {
-  questionId: z.string().describe('Question UUID'),
+server.tool('karea_edit_question', 'Edit an open question: change its text, status (open, answered or cancelled), answer, or linked tasks. Only the fields you pass change. Returns the updated question.', {
+  questionId: z.string().describe('Question UUID or short ID (e.g. KAQ3)'),
   question: z.string().optional().describe('Update the question text'),
   answer: z.string().optional().describe('Set or update the answer'),
   status: z.string().optional().describe('Change status: open, answered, cancelled'),
@@ -539,16 +690,16 @@ server.tool('karea_edit_question', 'Edit an open question', {
 })
 
 // Delete a question
-server.tool('karea_delete_question', 'Delete an open question', {
-  questionId: z.string().describe('Question UUID'),
+server.tool('karea_delete_question', 'Permanently delete an open question. Irreversible. To keep it but mark it resolved, set its status to cancelled via karea_edit_question instead.', {
+  questionId: z.string().describe('Question UUID or short ID (e.g. KAQ3)'),
 }, async ({ questionId }) => {
   await karea.deleteQuestion(questionId)
   return { content: [{ type: 'text', text: 'Question deleted.' }] }
 })
 
 // List resources
-server.tool('karea_list_resources', 'List resources (text notes & files) in a project', {
-  projectId: z.string().optional().describe('Project name or ID'),
+server.tool('karea_list_resources', 'List resources (text notes & files). With a projectId it returns every resource belonging to that project - whether assigned to it directly, linked to one of its tasks, or filed under a folder named after the project (e.g. knowledge-base docs). Omit projectId to list all your resources, including unfiled ones.', {
+  projectId: z.string().optional().describe('Project name or ID. Omit to list ALL your resources (including unfiled / knowledge-base items not tied to any task).'),
 }, async ({ projectId }) => {
   const pid = await resolveProject(projectId)
   const resources = await karea.listResources(pid)
@@ -567,7 +718,7 @@ server.tool('karea_list_resources', 'List resources (text notes & files) in a pr
 })
 
 // Get resource content
-server.tool('karea_get_resource', 'Get a text resource content by ID', {
+server.tool('karea_get_resource', 'Return a text resource with its full content and metadata, by ID. Read-only.', {
   resourceId: z.string().describe('Resource UUID'),
 }, async ({ resourceId }) => {
   const resource = await karea.getResource(resourceId)
@@ -593,7 +744,7 @@ server.tool('karea_get_resource', 'Get a text resource content by ID', {
 })
 
 // Create text resource
-server.tool('karea_create_resource', 'Create a text resource', {
+server.tool('karea_create_resource', 'Create a text resource (a note or document) in a project or folder and return it with its ID. To attach an existing resource to a task, use karea_link_resource_to_task.', {
   name: z.string().describe('Resource name'),
   content: z.string().describe('Text content'),
   projectId: z.string().optional().describe('Project name or ID'),
@@ -607,7 +758,7 @@ server.tool('karea_create_resource', 'Create a text resource', {
 })
 
 // Update text resource
-server.tool('karea_update_resource', 'Update a text resource', {
+server.tool('karea_update_resource', 'Overwrite a text resource content and/or metadata, by ID, and return the updated resource. Replaces the existing content rather than appending.', {
   resourceId: z.string().describe('Resource UUID'),
   name: z.string().optional().describe('New name'),
   content: z.string().optional().describe('New text content'),
@@ -624,7 +775,7 @@ server.tool('karea_update_resource', 'Update a text resource', {
 })
 
 // Delete resource
-server.tool('karea_delete_resource', 'Delete a resource', {
+server.tool('karea_delete_resource', 'Permanently delete a resource (text or file) by ID. Irreversible. To only detach it from a task, use karea_unlink_resource_from_task.', {
   resourceId: z.string().describe('Resource UUID'),
 }, async ({ resourceId }) => {
   await karea.deleteResource(resourceId)
@@ -701,7 +852,7 @@ server.tool('karea_unlink_resource_from_task', 'Remove the link between a resour
 })
 
 // List notes on a task
-server.tool('karea_list_notes', 'List notes on a task', {
+server.tool('karea_list_notes', 'List the notes (human-readable updates) on a task, newest first. Read-only.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async ({ task, projectId }) => {
@@ -720,43 +871,91 @@ server.tool('karea_list_notes', 'List notes on a task', {
   return { content: [{ type: 'text', text: lines.join('\n\n') }] }
 })
 
-// Add note to task
-server.tool('karea_add_note', 'Add a note to a task', {
+// Link an AI coding session to a task so the user can see history and copy
+// a resume command. Providers: claude-code, opencode, codex, cursor, aider,
+// other (KA291).
+server.tool('karea_link_session', 'Link your current AI coding session (Claude Code, OpenCode, Codex, Cursor, Aider) to a Karea task so the user can see the session history for that task and copy a command to resume the session later. Call this once per task you\'re working on. For Claude Code, pass sessionId as the CLI session id; for OpenCode use its session id; etc.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
-  content: z.string().describe('Note content'),
+  provider: z.enum(['claude-code', 'opencode', 'codex', 'cursor', 'aider', 'other']).describe('AI provider that owns the session'),
+  sessionId: z.string().describe('Provider session ID (used to resume). Claude Code: the id from `claude --resume`. OpenCode: the id from `opencode --session`. Codex: `codex resume`.'),
+  label: z.string().optional().describe('Short human label for the session (e.g. "Feature draft", "Bug repro")'),
+  projectId: z.string().optional().describe('Project name or ID (helps resolve visual IDs)'),
+}, async ({ task, provider, sessionId, label, projectId }) => {
+  const pid = await resolveProject(projectId)
+  const taskId = await resolveTaskId(task, pid)
+  const session = await karea.linkAISession(taskId, { provider, sessionId, label })
+  return { content: [{ type: 'text', text: `Linked ${provider} session ${sessionId} to task ${taskId}.\nRow ID: ${session.id}` }] }
+})
+
+// List AI sessions linked to a task
+server.tool('karea_list_sessions', 'List AI coding sessions linked to a task (provider, sessionId, label, last active, resume command). Read-only.', {
+  task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
+  projectId: z.string().optional().describe('Project name or ID (helps resolve visual IDs)'),
+}, async ({ task, projectId }) => {
+  const pid = await resolveProject(projectId)
+  const taskId = await resolveTaskId(task, pid)
+  const rows = await karea.listAISessions(taskId)
+  if (!rows.length) return { content: [{ type: 'text', text: 'No AI sessions linked to this task.' }] }
+  const lines = rows.map((r: any) => {
+    const active = new Date(r.lastActiveAt || r.createdAt).toLocaleString()
+    return `[${r.provider}] ${r.label || r.sessionId}\n  Session ID: ${r.sessionId}\n  Last active: ${active}\n  Row ID: ${r.id}`
+  })
+  return { content: [{ type: 'text', text: lines.join('\n\n') }] }
+})
+
+// Unlink an AI session
+server.tool('karea_unlink_session', 'Remove a previously-linked AI session from a task. Use the row ID from karea_list_sessions or karea_link_session.', {
+  task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
+  sessionRowId: z.string().describe('Row ID of the linked session (from karea_list_sessions)'),
+  projectId: z.string().optional().describe('Project name or ID (helps resolve visual IDs)'),
+}, async ({ task, sessionRowId, projectId }) => {
+  const pid = await resolveProject(projectId)
+  const taskId = await resolveTaskId(task, pid)
+  await karea.unlinkAISession(taskId, sessionRowId)
+  return { content: [{ type: 'text', text: `Unlinked session ${sessionRowId} from task ${taskId}.` }] }
+})
+
+// Add note to task
+server.tool('karea_add_note', 'Add a note to a task. Notes are human-readable updates/observations (the user reads them). For private AI working memory that persists across sessions, use karea_set_context instead.', {
+  task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
+  content: z.string().describe('Note content. Markdown is supported (lists, **bold**, `code`, links) - use it when it improves readability; plain text is also fine.'),
   projectId: z.string().optional().describe('Project name or ID'),
+  ...sessionLinkFields,
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(`/vt ${q(params.task)}`, pid)
   const taskId = result.taskId || params.task
   const taskData = await karea.getTask(taskId)
   const note = await karea.addNote(taskData.id, params.content)
-  const parts = [`Note added to "${taskData.title}".`]
+  const linkNote = await maybeLinkSession(taskData.id, params)
+  const parts = [`Note added to "${taskData.title}".${linkNote || ''}`]
   if (note?.id) parts.push(`Note ID: ${note.id}`)
   parts.push(...recordFooter('task', { id: taskData.id, displayId: result.displayId || taskData.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
 // Edit a note on a task
-server.tool('karea_edit_note', 'Edit an existing note on a task', {
+server.tool('karea_edit_note', 'Change the text of an existing note on a task, by note ID, and return the updated note.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   noteId: z.string().describe('Note UUID (from karea_list_notes)'),
-  content: z.string().describe('Updated note content'),
+  content: z.string().describe('Updated note content. Markdown is supported (lists, **bold**, `code`, links); plain text is also fine.'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
+  ...sessionLinkFields,
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(`/vt ${q(params.task)}`, pid)
   const taskId = result.taskId || params.task
   const taskData = await karea.getTask(taskId)
   await karea.updateNote(taskData.id, params.noteId, params.content)
-  const parts = [`Note updated on "${taskData.title}".`]
+  const linkNote = await maybeLinkSession(taskData.id, params)
+  const parts = [`Note updated on "${taskData.title}".${linkNote || ''}`]
   parts.push(`Note ID: ${params.noteId}`)
   parts.push(...recordFooter('task', { id: taskData.id, displayId: result.displayId || taskData.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
 // Delete a note from a task
-server.tool('karea_delete_note', 'Delete a note from a task', {
+server.tool('karea_delete_note', 'Permanently delete a note from a task, by note ID. Irreversible.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   noteId: z.string().describe('Note UUID (from karea_list_notes)'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
@@ -781,13 +980,14 @@ server.tool('karea_create_subtask', 'Create a subtask under a parent task. Accep
   category: z.string().optional().describe('Category name (defaults to the parent\'s category if omitted)'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
-  description: z.string().optional().describe('Subtask description (short, one line)'),
+  description: z.string().optional().describe('Subtask description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short.'),
   markdown: z.string().optional().describe('Long-form markdown content — investigation findings, technical/functional docs, solution design, root cause analysis.'),
   source: z.string().optional().describe('Where this subtask came from'),
-  closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing'),
-  tags: z.array(z.string()).optional().describe('Tags to add (e.g. ["bug", "needs review", "urgent"])'),
+  closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing. Keep each one short and concrete - 1 short sentence, ideally under ~120 chars (e.g. "Tests pass in CI", "PR approved"). Do NOT write paragraphs.'),
+  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (verify with karea_view_task or the project list). Do NOT invent new tags unless the user explicitly asked for one — a typo or a paraphrase spawns duplicate tags. When unsure, omit and ask the user.'),
   jiraIssueKey: z.string().optional().describe('JIRA issue key to link (e.g. PROJ-123). Issue must exist in JIRA.'),
   projectId: z.string().optional().describe('Project name or ID (needed if parent is a visual ID)'),
+  ...sessionLinkFields,
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
 
@@ -832,7 +1032,9 @@ server.tool('karea_create_subtask', 'Create a subtask under a parent task. Accep
   const parentVisualId = parentData.project?.prefix && parentData.seq != null
     ? `${parentData.project.prefix}${parentData.seq}`
     : null
-  const parts = [(result.response || 'Subtask created.').replace(/^Task created/i, 'Subtask created')]
+  // KA367
+  const linkNote = await maybeLinkSession(result.taskId, params)
+  const parts = [(result.response || 'Subtask created.').replace(/^Task created/i, 'Subtask created') + (linkNote || '')]
   parts.push(`Parent: ${parentVisualId ? parentVisualId + ' · ' : ''}"${parentData.title}" (id: ${parentData.id})`)
   parts.push(...recordFooter('task', { id: result.taskId, displayId: result.displayId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
@@ -865,9 +1067,9 @@ server.tool('karea_list_subtasks', 'List subtasks of a parent task. Accepts the 
 })
 
 // Add closing requisite to a task
-server.tool('karea_add_requisite', 'Add a closing requisite to a task', {
+server.tool('karea_add_requisite', 'Add a closing requisite (a checklist item that must be completed before the task may be closed) to a task, and return it.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
-  description: z.string().describe('What must be done before closing'),
+  description: z.string().describe('What must be done before closing. Keep it short and concrete - 1 short sentence, ideally under ~120 chars (e.g. "Deploy verified on staging"). Do NOT write a paragraph.'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
@@ -882,7 +1084,7 @@ server.tool('karea_add_requisite', 'Add a closing requisite to a task', {
 })
 
 // Toggle closing requisite completion
-server.tool('karea_toggle_requisite', 'Mark a closing requisite as complete or incomplete', {
+server.tool('karea_toggle_requisite', 'Mark a closing requisite complete or incomplete, by ID. This affects whether karea_close_task warns about unmet requisites.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   requisiteId: z.string().describe('Requisite UUID (from karea_view_task)'),
   completed: z.boolean().describe('true to complete, false to uncomplete'),
@@ -900,7 +1102,7 @@ server.tool('karea_toggle_requisite', 'Mark a closing requisite as complete or i
 })
 
 // Delete closing requisite
-server.tool('karea_delete_requisite', 'Delete a closing requisite from a task', {
+server.tool('karea_delete_requisite', 'Permanently delete a closing requisite from a task, by ID. Irreversible.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   requisiteId: z.string().describe('Requisite UUID (from karea_view_task)'),
   projectId: z.string().optional().describe('Project name or ID'),
@@ -916,7 +1118,7 @@ server.tool('karea_delete_requisite', 'Delete a closing requisite from a task', 
 })
 
 // Get JIRA link for a task
-server.tool('karea_get_jira_link', 'Get the JIRA link for a task', {
+server.tool('karea_get_jira_link', 'Return the linked JIRA issue (key and URL) for a task, if one exists. Read-only.', {
   task: z.string().describe('Task name, visual ID, or UUID'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async (params) => {

@@ -19,9 +19,24 @@ async function request(path: string, options: RequestInit = {}) {
   return res.json()
 }
 
-export async function listProjects() {
-  return request('/api/projects')
+// KA364: cache the project list in-process for a short window. Every tool
+// call that accepts a `projectId` used to fire GET /api/projects first to
+// resolve name → id — doubling the wall-clock latency of every context /
+// markdown / resource call. Same MCP process reuses the cache within the TTL.
+const PROJECTS_TTL_MS = 30_000
+let projectsCache: { at: number; value: any[] } | null = null
+
+export async function listProjects(): Promise<any[]> {
+  const now = Date.now()
+  if (projectsCache && now - projectsCache.at < PROJECTS_TTL_MS) return projectsCache.value
+  const value = await request('/api/projects') as any[]
+  projectsCache = { at: now, value }
+  return value
 }
+
+export function invalidateProjectsCache() { projectsCache = null }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export async function listTasks(opts: { projectId?: string; status?: string; closedSince?: string; limit?: number; slim?: boolean } = {}) {
   const params = new URLSearchParams({ format: 'json' })
@@ -34,6 +49,8 @@ export async function listTasks(opts: { projectId?: string; status?: string; clo
 }
 
 export async function resolveProjectId(nameOrId: string): Promise<string | undefined> {
+  // KA364: skip the HTTP round-trip when the caller already gave us a UUID.
+  if (UUID_RE.test(nameOrId)) return nameOrId
   const projects = await listProjects()
   const match = projects.find((p: any) =>
     p.id === nameOrId || p.name.toLowerCase() === nameOrId.toLowerCase()
@@ -76,6 +93,19 @@ export async function setMarkdown(task: string, markdown: string, projectId?: st
   return request('/api/tasks/markdown', {
     method: 'PUT',
     body: JSON.stringify({ task, markdown, projectId }),
+  })
+}
+
+export async function getContext(task: string, projectId?: string) {
+  const params = new URLSearchParams({ task })
+  if (projectId) params.set('projectId', projectId)
+  return request(`/api/tasks/context?${params}`)
+}
+
+export async function setContext(task: string, context: string, projectId?: string, title?: string) {
+  return request('/api/tasks/context', {
+    method: 'PUT',
+    body: JSON.stringify({ task, context, projectId, title }),
   })
 }
 
@@ -142,6 +172,23 @@ export async function unlinkResourceFromTask(resourceId: string, taskId: string)
 
 export async function listNotes(taskId: string) {
   return request(`/api/tasks/${taskId}/notes`)
+}
+
+export async function listAISessions(taskId: string) {
+  return request(`/api/tasks/${taskId}/ai-sessions`)
+}
+
+export async function linkAISession(taskId: string, data: { provider: string; sessionId: string; label?: string }) {
+  return request(`/api/tasks/${taskId}/ai-sessions`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  })
+}
+
+export async function unlinkAISession(taskId: string, sessionRowId: string) {
+  return request(`/api/tasks/${taskId}/ai-sessions?sessionRowId=${sessionRowId}`, {
+    method: 'DELETE',
+  })
 }
 
 export async function addNote(taskId: string, content: string, source = 'mcp') {

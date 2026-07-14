@@ -1,6 +1,6 @@
 name: karea
 displayName: Karea Task Manager
-description: 44 tools so Claude Code, Cursor, and other MCP clients can manage your dev tasks (create, edit, close, recap, link to Jira, attach resources).
+description: 49 tools so Claude Code, Cursor, and other MCP clients can manage your dev tasks (create, edit, close, recap, link to Jira, attach resources).
 publisher: starecz
 homepage: https://karea.app
 repository: git+https://github.com/starecz/karea-mcp.git

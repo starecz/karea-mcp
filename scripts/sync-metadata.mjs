@@ -31,10 +31,10 @@ const baseDescription = `MCP server for Karea task management - ${toolCount} too
 const serverJson = {
   $schema: 'https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json',
   name: pkg.mcpName,
-  description: `Karea task manager MCP server - ${toolCount} tools so Claude Code, Cursor, and other MCP clients can create, edit, close, and recap your dev tasks while you code.`,
+  description: `Karea task manager - ${toolCount} tools for Claude Code, Cursor, and other MCP clients.`,
   status: 'active',
   repository: {
-    url: pkg.repository.url,
+    url: pkg.repository.url.replace(/^git\+/, '').replace(/\.git$/, ''),
     source: 'github'
   },
   version: pkg.version,
