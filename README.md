@@ -41,7 +41,7 @@ Add to `~/.claude.json` (or run `claude mcp add`):
 }
 ```
 
-Get your API key at <https://karea.app/dashboard/settings/api-keys>.
+Get your API key at <https://karea.app/dashboard/settings?section=api-keys>.
 
 ## Configure (Cursor)
 

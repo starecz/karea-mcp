@@ -48,7 +48,7 @@ const serverJson = {
       environmentVariables: [
         {
           name: 'KAREA_API_KEY',
-          description: 'Your Karea API key. Generate at https://karea.app/dashboard/settings/api-keys',
+          description: 'Your Karea API key. Generate at https://karea.app/dashboard/settings?section=api-keys',
           isRequired: true,
           isSecret: true
         },
@@ -92,7 +92,7 @@ startCommand:
       kareaApiKey:
         type: string
         title: Karea API Key
-        description: Generate yours at https://karea.app/dashboard/settings/api-keys
+        description: Generate yours at https://karea.app/dashboard/settings?section=api-keys
         format: password
       kareaUrl:
         type: string

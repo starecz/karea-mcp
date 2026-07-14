@@ -1,7 +1,9 @@
 FROM node:20-alpine
 
-# Preinstall the published npm package so cold-start is fast for Glama introspection
-RUN npm install -g karea-mcp@0.4.1
+# Preinstall the published npm package so cold-start is fast for Glama introspection.
+# No version pin — Glama rebuilds this image per commit, so `latest` picks up
+# whatever is on npm at build time. Bumps ride along automatically.
+RUN npm install -g karea-mcp@latest
 
 # Stub key so the process starts cleanly; tools/list does not call Karea's API
 ENV KAREA_API_KEY=glama-introspection-stub
