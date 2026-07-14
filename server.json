@@ -7,13 +7,13 @@
     "url": "https://github.com/starecz/karea-mcp",
     "source": "github"
   },
-  "version": "0.6.0",
+  "version": "0.6.1",
   "websiteUrl": "https://karea.app",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "karea-mcp",
-      "version": "0.6.0",
+      "version": "0.6.1",
       "transport": {
         "type": "stdio"
       },

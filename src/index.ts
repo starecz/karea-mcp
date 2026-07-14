@@ -16,9 +16,27 @@ function q(value: string): string {
 // the LLM (and a human reading the chat) can always click straight back to
 // the affected object.
 type RecordKind = 'task' | 'resource' | 'project'
+// KA375: Link output should always land on the public-facing app, not on
+// whichever internal API host the MCP happens to be talking to (dev, staging,
+// proxy). `KAREA_PUBLIC_URL` lets callers override; otherwise we default to
+// karea.app so a shared task link works for anyone who receives it. Only if
+// neither is set do we fall back to KAREA_URL — that keeps local-dev
+// (KAREA_URL=http://localhost:3002) usable without extra config.
+function publicBase(): string {
+  const explicit = process.env.KAREA_PUBLIC_URL
+  if (explicit) return explicit.replace(/\/$/, '')
+  const apiUrl = process.env.KAREA_URL || ''
+  // Any URL that is NOT localhost / .kpilotlabs.com goes through as-is,
+  // since the caller pointed at a real public deployment. Local dev + our
+  // internal proxy hosts get rewritten to karea.app for shareable links.
+  if (/^(https?:\/\/)?(localhost|127\.0\.0\.1|.*\.kpilotlabs\.com)(:|\/|$)/i.test(apiUrl)) {
+    return 'https://karea.app'
+  }
+  return (apiUrl || 'https://karea.app').replace(/\/$/, '')
+}
 function recordFooter(kind: RecordKind, opts: { id?: string | null; displayId?: string | null }): string[] {
   const lines: string[] = []
-  const base = (process.env.KAREA_URL || 'http://localhost:3002').replace(/\/$/, '')
+  const base = publicBase()
   if (opts.id) lines.push(`ID: ${opts.id}`)
   if (opts.displayId) lines.push(`Short ID: ${opts.displayId}`)
   if (opts.id) {
@@ -657,7 +675,7 @@ server.tool('karea_create_question', 'Create an open question (a decision or blo
   if (!pid) return { content: [{ type: 'text', text: 'Project not found.' }] }
   const result = await karea.createQuestion({ projectId: pid, question: params.question, markdown: params.markdown, taskIds: params.taskIds })
   const parts = [`Question created: "${params.question}"`]
-  const base = (process.env.KAREA_URL || 'http://localhost:3002').replace(/\/$/, '')
+  const base = publicBase()
   const qPrefix = result?.project?.prefix
   if (result?.seq != null) parts.push(`Short ID: ${qPrefix ? `${qPrefix}Q${result.seq}` : `Q${result.seq}`}`)
   if (result?.id) parts.push(`ID: ${result.id}`)
