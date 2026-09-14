@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.starecz/karea-mcp",
-  "description": "Karea task manager - 49 tools for Claude Code, Cursor, and other MCP clients.",
+  "description": "Karea task manager - 64 tools for Claude Code, Cursor, and other MCP clients.",
   "status": "active",
   "repository": {
     "url": "https://github.com/starecz/karea-mcp",
     "source": "github"
   },
-  "version": "0.6.1",
+  "version": "0.8.0",
   "websiteUrl": "https://karea.app",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "karea-mcp",
-      "version": "0.6.1",
+      "version": "0.8.0",
       "transport": {
         "type": "stdio"
       },

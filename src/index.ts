@@ -15,12 +15,12 @@ function q(value: string): string {
 // mutation / lookup that returns a single record should pass through this so
 // the LLM (and a human reading the chat) can always click straight back to
 // the affected object.
-type RecordKind = 'task' | 'resource' | 'project'
+type RecordKind = 'task' | 'resource' | 'project' | 'meeting'
 // KA375: Link output should always land on the public-facing app, not on
 // whichever internal API host the MCP happens to be talking to (dev, staging,
 // proxy). `KAREA_PUBLIC_URL` lets callers override; otherwise we default to
 // karea.app so a shared task link works for anyone who receives it. Only if
-// neither is set do we fall back to KAREA_URL — that keeps local-dev
+// neither is set do we fall back to KAREA_URL - that keeps local-dev
 // (KAREA_URL=http://localhost:3002) usable without extra config.
 function publicBase(): string {
   const explicit = process.env.KAREA_PUBLIC_URL
@@ -43,6 +43,8 @@ function recordFooter(kind: RecordKind, opts: { id?: string | null; displayId?: 
     if (kind === 'task') lines.push(`Link: ${base}/dashboard/task/${opts.id}`)
     else if (kind === 'project') lines.push(`Link: ${base}/dashboard/${opts.id}`)
     else if (kind === 'resource') lines.push(`Link: ${base}/dashboard/resources`)
+    // KA465: the meetings page opens a meeting from an ?open= deep link.
+    else if (kind === 'meeting') lines.push(`Link: ${base}/dashboard/meetings?open=${opts.id}`)
   }
   return lines
 }
@@ -52,6 +54,73 @@ const server = new McpServer({
   version: '0.1.0',
 })
 
+// KA422: append pending reminders to EVERY tool response so an AI agent that
+// hits any karea MCP call is always told about a live reminder. Best-effort;
+// failures never break the primary response. Cached ~10s per-process to keep
+// tight tool-storms cheap.
+let _remCache: { at: number; text: string } | null = null
+async function pendingReminderNudge(): Promise<string> {
+  const now = Date.now()
+  if (_remCache && now - _remCache.at < 10_000) return _remCache.text
+  let text = ''
+  try {
+    const items = await karea.pendingReminders()
+    if (items.length > 0) {
+      const lines: string[] = ['', '⏰ Pending reminders:']
+      for (const r of items.slice(0, 5)) {
+        const t = r.task
+        const display = t?.project?.prefix && typeof t?.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t?.id || '').slice(0, 6)}`
+        const when = new Date(r.fireAt).toLocaleString()
+        const title = r.title || t?.title || 'Reminder'
+        lines.push(`  · [${r.id}] ${display} - ${title} (fires ${when})${r.repeat ? ` [repeat: ${r.repeat}]` : ''}`)
+      }
+      if (items.length > 5) lines.push(`  … and ${items.length - 5} more.`)
+      lines.push('Snooze / dismiss / mark-done via karea_snooze_reminder / karea_dismiss_reminder / karea_mark_reminder_done. Full list via karea_check_reminders.')
+      text = lines.join('\n')
+    }
+  } catch {}
+  _remCache = { at: now, text }
+  return text
+}
+
+// Wrap server.tool so every registered handler auto-appends the reminder
+// nudge to its text response. Preserves the original signature exactly.
+const _origTool = server.tool.bind(server)
+;(server as any).tool = (name: string, ...rest: any[]) => {
+  const handler = rest[rest.length - 1]
+  if (typeof handler !== 'function') return (_origTool as any)(name, ...rest)
+  const wrapped = async (...args: any[]) => {
+    let result: any
+    let thrown: any = null
+    try {
+      result = await handler(...args)
+    } catch (err) {
+      thrown = err
+    }
+    // Skip nudge for the reminder tools themselves.
+    if (/reminder/i.test(name)) {
+      if (thrown) throw thrown
+      return result
+    }
+    const nudge = await pendingReminderNudge().catch(() => '')
+    if (thrown) {
+      // Wrap the thrown error as its own text block + nudge so the caller
+      // still sees the reminder rather than a bare JSON-RPC error.
+      const msg = thrown instanceof Error ? thrown.message : String(thrown)
+      const content: any[] = [{ type: 'text', text: `Error: ${msg}` }]
+      if (nudge) content.push({ type: 'text', text: nudge })
+      return { content, isError: true }
+    }
+    if (!nudge) return result
+    const content = Array.isArray(result?.content) ? [...result.content] : []
+    content.push({ type: 'text', text: nudge })
+    return { ...result, content }
+  }
+  const newRest = [...rest]
+  newRest[newRest.length - 1] = wrapped
+  return (_origTool as any)(name, ...newRest)
+}
+
 async function resolveProject(nameOrId?: string): Promise<string | undefined> {
   if (!nameOrId) return undefined
   return karea.resolveProjectId(nameOrId)
@@ -59,7 +128,7 @@ async function resolveProject(nameOrId?: string): Promise<string | undefined> {
 
 // KA367: shared session-link params. Any task-referencing tool that accepts
 // these will atomically link the AI session to the target task after the
-// primary operation succeeds. Best-effort — link failures never block or
+// primary operation succeeds. Best-effort - link failures never block or
 // alter the primary tool's response.
 const AI_PROVIDERS = ['claude-code', 'opencode', 'codex', 'cursor', 'aider', 'other'] as const
 const sessionLinkFields = {
@@ -87,7 +156,7 @@ async function maybeLinkSession(
     })
     return ` Linked ${params.toolType} session ${params.aiSessionId}.`
   } catch {
-    // Silent — session linking is a convenience, not a hard requirement.
+    // Silent - session linking is a convenience, not a hard requirement.
     return null
   }
 }
@@ -95,17 +164,21 @@ async function maybeLinkSession(
 // List projects
 server.tool('karea_list_projects', 'List all Karea projects with their IDs', {}, async () => {
   const projects = await karea.listProjects()
-  const list = projects.map((p: any) => `${p.name} — id: ${p.id} (${p._count?.tasks || 0} tasks, categories: ${p.categories?.map((c: any) => c.name).join(', ') || 'none'})`).join('\n')
+  const list = projects.map((p: any) => `${p.name} - id: ${p.id} (${p._count?.tasks || 0} tasks, categories: ${p.categories?.map((c: any) => c.name).join(', ') || 'none'})`).join('\n')
   return { content: [{ type: 'text', text: list || 'No projects found.' }] }
 })
 
 // List tasks
-server.tool('karea_list_tasks', 'List tasks in a project. Defaults to open tasks (open, in_progress, blocked, review, backlog) capped at 200 to keep responses small. To see closed tasks pass status="done" and optionally closedSince (e.g. "14d", "7d", "24h"). To list everything, pass status="all".', {
+server.tool('karea_list_tasks', 'List tasks in a project. Defaults to open tasks (open, in_progress, blocked, review, backlog) capped at 200 to keep responses small. To see closed tasks pass status="done" and optionally closedSince (e.g. "14d", "7d", "24h"). To list everything, pass status="all". Optional filters (category, priority, assignee, search) narrow the result server-side - prefer them over post-filtering.', {
   projectId: z.string().optional().describe('Project name or ID (omit for default project)'),
   status: z.string().optional().describe('Filter by status: open, in_progress, blocked, review, backlog, done, cancelled. Comma-separated allowed (e.g. "open,in_progress"). "all" returns every status.'),
   closedSince: z.string().optional().describe('Only return tasks closed since this window. Relative (e.g. "14d", "7d", "24h") or ISO date. Implies status=done unless status is set.'),
   limit: z.number().int().positive().max(1000).optional().describe('Max tasks to return (default 200, cap 1000).'),
-}, async ({ projectId, status, closedSince, limit }) => {
+  category: z.string().optional().describe('Category name or UUID. Comma-separated allowed (e.g. "Bugs,Improvements").'),
+  priority: z.string().optional().describe('Priority 1–5. Comma-separated allowed (e.g. "1,2").'),
+  assignee: z.string().optional().describe('Assignee - name, email, or user UUID.'),
+  search: z.string().optional().describe('Case-insensitive substring match on the task title.'),
+}, async ({ projectId, status, closedSince, limit, category, priority, assignee, search }) => {
   const pid = await resolveProject(projectId)
 
   let resolvedStatus = status
@@ -120,6 +193,10 @@ server.tool('karea_list_tasks', 'List tasks in a project. Defaults to open tasks
     status: resolvedStatus,
     closedSince,
     limit: resolvedLimit,
+    category,
+    priority,
+    assignee,
+    search,
   })
   const tasks = data.tasks || []
 
@@ -150,10 +227,10 @@ server.tool('karea_create_task', 'Create a new task in a project and return it w
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
   description: z.string().optional().describe('Task description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short (a few sentences); use `markdown` for long-form docs.'),
-  markdown: z.string().optional().describe('Long-form markdown content — use for investigation findings, technical/functional docs, solution design, root cause analysis. This is the task\'s knowledge base.'),
+  markdown: z.string().optional().describe('Long-form markdown content - use for investigation findings, technical/functional docs, solution design, root cause analysis. This is the task\'s knowledge base.'),
   source: z.string().optional().describe('Where this task came from'),
   closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing. Keep each one short and concrete - 1 short sentence, ideally under ~120 chars (e.g. "Tests pass in CI", "PR approved"). Do NOT write paragraphs.'),
-  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (verify with karea_view_task or the project list). Do NOT invent new tags unless the user explicitly asked for one — a typo or a paraphrase spawns duplicate tags. When unsure, omit and ask the user.'),
+  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (verify with karea_view_task or the project list). Do NOT invent new tags unless the user explicitly asked for one - a typo or a paraphrase spawns duplicate tags. When unsure, omit and ask the user.'),
   parentId: z.string().optional().describe('Parent task ID to create this as a subtask'),
   jiraIssueKey: z.string().optional().describe('JIRA issue key to link (e.g. PROJ-123). Issue must exist in JIRA.'),
   projectId: z.string().optional().describe('Project name or ID'),
@@ -206,14 +283,17 @@ server.tool('karea_edit_task', 'Update fields of an existing task (title, status
   status: z.string().optional().describe('New status: open, in_progress, blocked, review, done'),
   sla: z.string().optional().describe('New deadline'),
   description: z.string().optional().describe('New description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short (a few sentences); use `markdown` for long-form docs.'),
-  markdown: z.string().optional().describe('Long-form markdown content — use for investigation findings, technical/functional docs, solution design, root cause analysis. Overwrites existing markdown; read first with karea_get_markdown to append.'),
+  markdown: z.string().optional().describe('Long-form markdown content - use for investigation findings, technical/functional docs, solution design, root cause analysis. Overwrites existing markdown; read first with karea_get_markdown to append.'),
   category: z.string().optional().describe('Move to category'),
   note: z.string().optional().describe('Add a human-readable note (the user reads these). Markdown is supported (lists, **bold**, `code`, links) - use it when it makes the note more readable; plain text is also fine. For private AI cross-session working memory use karea_set_context instead.'),
-  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (check karea_view_task first). Do NOT invent new tags unless the user explicitly asked for one — the API upserts by name and typos create duplicates. When unsure, omit and ask.'),
+  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (check karea_view_task first). Do NOT invent new tags unless the user explicitly asked for one - the API upserts by name and typos create duplicates. When unsure, omit and ask.'),
   clearTags: z.boolean().optional().describe('Remove all existing tags before adding new ones'),
   closingRequisites: z.array(z.string()).optional().describe('Closing requisites to add. Keep each short and concrete - 1 short sentence, ideally under ~120 chars. Do NOT write paragraphs.'),
   clearClosingRequisites: z.boolean().optional().describe('Remove all existing closing requisites before adding new ones'),
   jiraIssueKey: z.string().optional().describe('JIRA issue key to link (e.g. PROJ-123). Set to "unlink" to remove.'),
+  linkTasks: z.array(z.string()).optional().describe('Other tasks to LINK to this one - names, visual IDs (KA123) or UUIDs. This creates a real task-to-task relationship that shows on both tasks, which is what you want when the user says "related to KA123". Do NOT settle for writing "relates to X" in the description instead. Link type is set by linkType (default "related").'),
+  linkType: z.enum(['related', 'blocks', 'blocked_by']).optional().describe('Relationship for linkTasks: "related" (default), "blocks" (this task blocks them), or "blocked_by" (this task is blocked by them).'),
+  unlinkTasks: z.array(z.string()).optional().describe('Tasks to UNLINK from this one - names, visual IDs or UUIDs. Removes the link whichever direction it was created in.'),
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
 }, async (params) => {
@@ -231,7 +311,7 @@ server.tool('karea_edit_task', 'Update fields of an existing task (title, status
 
   // The /et command above only knows about parent-level fields. Everything
   // below (markdown, rename, notes, requisites, JIRA) is applied through
-  // separate API calls AFTER that response was composed — track those ops so
+  // separate API calls AFTER that response was composed - track those ops so
   // the final message reflects them instead of echoing a stale "no changes"
   // and tricking callers into retrying (KA343).
   const childOps: string[] = []
@@ -282,11 +362,52 @@ server.tool('karea_edit_task', 'Update fields of an existing task (title, status
     }
   }
 
+  // Task-to-task links. Each target is resolved the same way `task` itself is,
+  // so callers can pass visual IDs. Failures are reported per target rather
+  // than aborting the whole edit - a typo in one id shouldn't lose the rest.
+  if (params.linkTasks?.length) {
+    const sourceId = await resolveTaskId(params.task, pid)
+    const linkType = params.linkType || 'related'
+    for (const target of params.linkTasks) {
+      try {
+        const targetId = await resolveTaskId(target, pid)
+        await karea.linkTask(sourceId, targetId, linkType)
+        childOps.push(`linked ${linkType} to ${target}`)
+      } catch (err: any) {
+        // "Tasks are already linked" is the common one and is not a failure
+        // worth alarming the caller about.
+        childOps.push(`link to ${target} failed: ${err.message}`)
+      }
+    }
+  }
+  if (params.unlinkTasks?.length) {
+    const sourceId = await resolveTaskId(params.task, pid)
+    let links: any[] = []
+    try {
+      links = await karea.getTaskLinks(sourceId)
+    } catch (err: any) {
+      childOps.push(`could not read existing links: ${err.message}`)
+    }
+    for (const target of params.unlinkTasks) {
+      try {
+        const targetId = await resolveTaskId(target, pid)
+        // getTaskLinks reports the OTHER task as `taskId` in both directions,
+        // so one comparison covers incoming and outgoing alike.
+        const hit = links.find((l: any) => l.taskId === targetId)
+        if (!hit) { childOps.push(`no link to ${target} to remove`); continue }
+        await karea.unlinkTask(sourceId, hit.id)
+        childOps.push(`unlinked ${target}`)
+      } catch (err: any) {
+        childOps.push(`unlink of ${target} failed: ${err.message}`)
+      }
+    }
+  }
+
   let response = result.response || 'Task updated.'
   if (childOps.length > 0) {
     const opsText = childOps.join(', ')
     // The /et reply legitimately says "(no changes)" when only child-level
-    // params were passed — replace it with what actually happened.
+    // params were passed - replace it with what actually happened.
     if (response.includes('(no changes)')) {
       response = response.replace('(no changes)', `(${opsText})`)
     } else if (/updated \(([^)]*)\)/.test(response)) {
@@ -294,7 +415,7 @@ server.tool('karea_edit_task', 'Update fields of an existing task (title, status
     } else {
       response += ` Also: ${opsText}.`
     }
-    // The embedded task card was rendered BEFORE the child writes — patch its
+    // The embedded task card was rendered BEFORE the child writes - patch its
     // note/requisite counts from a post-write fetch so callers don't see
     // requisiteCount:0 for rows that were just persisted.
     const cardMatch = response.match(/@@KAREA_VIEW@@(\{.*\})/)
@@ -395,7 +516,7 @@ server.tool('karea_doing', 'Create a task you are working on right now (status: 
 })
 
 // View task details
-server.tool('karea_view_task', 'Return one task with all its details (status, priority, deadline, category, description, notes, requisites, links), located by visual ID, name or UUID. Pass includeContext=true to also inline the task\'s AI Context in the response — avoids a follow-up karea_get_context round-trip. Read-only.', {
+server.tool('karea_view_task', 'Return one task with all its details (status, priority, deadline, category, description, notes, requisites, links), located by visual ID, name or UUID. Pass includeContext=true to also inline the task\'s AI Context in the response - avoids a follow-up karea_get_context round-trip. Read-only.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
   includeContext: z.boolean().optional().describe('If true, inline the task\'s AI Context (cross-session working memory) in this response. Default false; when false, the response instead hints that Context exists and can be fetched with karea_get_context.'),
@@ -421,6 +542,40 @@ server.tool('karea_view_task', 'Return one task with all its details (status, pr
         })
         response += `\n\nLinked Resources (${links.length}):\n${lines.join('\n')}`
       }
+      // KA465: meetings this task was discussed at. /api/tasks/[id] does NOT
+      // include them - they only exist on /api/tasks/[id]/meetings - which is
+      // why they were invisible to MCP until now.
+      try {
+        const md = await karea.getTaskMeetings(taskId)
+        const meetings = md.meetings || []
+        if (meetings.length > 0) {
+          const lines = meetings.map((m: any) => {
+            const when = m.startAt ? new Date(m.startAt).toISOString().replace('T', ' ').slice(0, 16) : '?'
+            return `  - ${when} ${m.title}${m.location ? ` @ ${m.location}` : ''} (id: ${m.id})`
+          })
+          response += `\n\nLinked Meetings (${meetings.length}):\n${lines.join('\n')}`
+        }
+      } catch {
+        // ignore - meetings are supplementary
+      }
+      // Task-to-task links, both directions. Shown like the resource block so
+      // a caller can see a relationship exists without a second round-trip.
+      try {
+        const taskLinks = await karea.getTaskLinks(taskId)
+        if (Array.isArray(taskLinks) && taskLinks.length > 0) {
+          const lines = taskLinks.map((l: any) => {
+            const rel = l.linkType === 'blocks'
+              ? (l.direction === 'outgoing' ? 'blocks' : 'blocked by')
+              : l.linkType === 'blocked_by'
+                ? (l.direction === 'outgoing' ? 'blocked by' : 'blocks')
+                : 'related to'
+            return `  - ${rel} ${l.displayId || l.taskId} ${l.title} [${l.status}]`
+          })
+          response += `\n\nLinked Tasks (${taskLinks.length}):\n${lines.join('\n')}`
+        }
+      } catch {
+        // ignore - links are supplementary
+      }
       if ((taskData as any).aiContext) {
         if (params.includeContext) {
           // Inline the context so the caller doesn't need a second round-trip.
@@ -437,13 +592,78 @@ server.tool('karea_view_task', 'Return one task with all its details (status, pr
         }
       }
     } catch {
-      // ignore — keep the original response
+      // ignore - keep the original response
     }
   }
 
   const footer = recordFooter('task', { id: taskId || result.taskId, displayId: result.displayId })
   if (footer.length) response += `\n\n${footer.join('\n')}`
   return { content: [{ type: 'text', text: response }] }
+})
+
+// KA406: view many tasks in one call. Bounded concurrency, per-task error
+// isolation so a single not-found doesn't kill the whole batch.
+server.tool('karea_view_tasks', 'Return details for MANY tasks in one response. Pass an array of task identifiers (visualIds, names, or UUIDs) and get one consolidated response with a block per task, separated by dividers. Use this instead of calling karea_view_task N times when you want to inspect a batch. Max 50 per call. Read-only.', {
+  tasks: z.array(z.string()).min(1).max(50).describe('Array of task identifiers (visualId like C1/T2, name, or UUID). 1–50 items.'),
+  projectId: z.string().optional().describe('Project name or ID (needed when visual IDs are used and share a single project).'),
+  includeContext: z.boolean().optional().describe('If true, inline each task\'s AI Context in its block. Default false.'),
+}, async (params) => {
+  const pid = await resolveProject(params.projectId)
+
+  const fetchOne = async (id: string): Promise<string> => {
+    try {
+      const result = await karea.sendCommand(`/vt ${q(id)}`, pid)
+      let block = result.response || `[NOT FOUND: ${id}]`
+      const taskId = result.taskId
+      if (taskId) {
+        try {
+          const taskData = await karea.getTask(taskId)
+          const links = (taskData as any).resourceLinks || []
+          if (links.length > 0) {
+            const lines = links.map((l: any) => {
+              const r = l.resource || {}
+              const size = r.sizeBytes != null
+                ? r.sizeBytes < 1024 ? `${r.sizeBytes}B` : r.sizeBytes < 1048576 ? `${Math.round(r.sizeBytes / 1024)}KB` : `${(r.sizeBytes / 1048576).toFixed(1)}MB`
+                : ''
+              const folder = r.folder ? ` [${r.folder}]` : ''
+              const mime = r.mimeType ? ` ${r.mimeType}` : ''
+              return `  - ${r.type === 'text' ? 'Text' : 'File'} | ${r.name}${size ? ' | ' + size : ''}${mime}${folder} (id: ${r.id})`
+            })
+            block += `\n\nLinked Resources (${links.length}):\n${lines.join('\n')}`
+          }
+          if ((taskData as any).aiContext) {
+            if (params.includeContext) {
+              try {
+                const ctx = await karea.getContext(id, pid)
+                const body = (ctx && ctx.context) ? ctx.context : (taskData as any).aiContext
+                block += `\n\nAI Context:\n${body}`
+              } catch {
+                block += `\n\nAI Context:\n${(taskData as any).aiContext}`
+              }
+            } else {
+              block += `\n\n(AI Context available - re-call with includeContext=true to inline.)`
+            }
+          }
+        } catch { /* keep the original block */ }
+      }
+      return `### ${id}\n${block}`
+    } catch (err: any) {
+      return `### ${id}\n[NOT FOUND: ${id}${err?.message ? ' - ' + err.message : ''}]`
+    }
+  }
+
+  // Bounded concurrency: 5 at a time so we don't hammer the API on large batches.
+  const CONCURRENCY = 5
+  const results: string[] = new Array(params.tasks.length)
+  for (let i = 0; i < params.tasks.length; i += CONCURRENCY) {
+    const slice = params.tasks.slice(i, i + CONCURRENCY)
+    const settled = await Promise.all(slice.map(fetchOne))
+    for (let j = 0; j < settled.length; j++) results[i + j] = settled[j]
+  }
+
+  const sep = '\n\n' + '─'.repeat(60) + '\n\n'
+  const header = `Viewed ${params.tasks.length} task${params.tasks.length === 1 ? '' : 's'}:\n\n`
+  return { content: [{ type: 'text', text: header + results.join(sep) }] }
 })
 
 // Create project
@@ -541,33 +761,69 @@ server.tool('karea_recap', 'Return a summary of recent activity (tasks created, 
     return ` (subtask of ${ref})`
   }
 
+  const updates = data.updates || {}
+  const updateSuffix = (id: string) => {
+    const u = updates[id]
+    if (!u) return ''
+    const bits: string[] = []
+    if (u.change) {
+      // KA417 follow-up: say what CHANGED, not just the resulting value. A
+      // bare "[Context]" told the reader a task moved but not how.
+      const c = u.change
+      const VERB: Record<string, string> = {
+        note: 'added', context: 'updated', markdown: 'updated', tags: 'updated',
+        assignee: 'changed', priority: 'changed', schedule: 'moved',
+        details: 'edited', other: 'recorded',
+      }
+      if (c.kind === 'status') {
+        bits.push(c.from ? `[Status: ${c.from} -> ${c.value ?? c.to}]` : `[Status -> ${c.value ?? c.to}]`)
+      } else if (c.kind === 'deadline') {
+        bits.push(c.value ?? c.to ? `[Deadline -> ${c.value ?? c.to}]` : '[Deadline cleared]')
+      } else {
+        bits.push(`[${c.label} ${VERB[c.kind] || 'updated'}]`)
+      }
+    }
+    if (u.lastNote) bits.push(`note: "${u.lastNote.preview}"`)
+    return bits.length ? '  ' + bits.join(' ') : ''
+  }
+
   if (data.done?.length) {
     sections.push('DONE:')
     data.done.forEach((t: any) => {
       let line = `  ${t.displayId ? t.displayId + ' ' : ''}${t.title}${parentSuffix(t)}`
       if (t.closingReason) line += ` [${t.closingReason}]`
-      sections.push(line)
+      sections.push(line + updateSuffix(t.id))
     })
   }
 
   if (data.quickTasks?.length) {
     sections.push('\nQUICK TASKS:')
-    data.quickTasks.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}${t.title}`))
+    data.quickTasks.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}${t.title}${updateSuffix(t.id)}`))
   }
 
   if (data.inProgress?.length) {
     sections.push('\nIN PROGRESS:')
-    data.inProgress.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}P${t.priority} ${t.title}${parentSuffix(t)}`))
+    data.inProgress.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}P${t.priority} ${t.title}${parentSuffix(t)}${updateSuffix(t.id)}`))
+  }
+
+  if ((data as any).review?.length) {
+    sections.push('\nIN REVIEW:')
+    ;(data as any).review.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}P${t.priority} ${t.title}${parentSuffix(t)}${updateSuffix(t.id)}`))
   }
 
   if (data.blocked?.length) {
     sections.push('\nBLOCKED:')
-    data.blocked.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}${t.title}${parentSuffix(t)}`))
+    data.blocked.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}${t.title}${parentSuffix(t)}${updateSuffix(t.id)}`))
   }
 
   if (data.upcoming?.length) {
     sections.push('\nDUE TODAY:')
-    data.upcoming.forEach((t: any) => sections.push(`  ${t.title}`))
+    data.upcoming.forEach((t: any) => sections.push(`  ${t.title}${updateSuffix(t.id)}`))
+  }
+
+  if (data.updated?.length) {
+    sections.push('\nUPDATED (only change in window):')
+    data.updated.forEach((t: any) => sections.push(`  ${t.displayId ? t.displayId + ' ' : ''}${t.title}${parentSuffix(t)}${updateSuffix(t.id)}`))
   }
 
   if (data.openQuestions?.length) {
@@ -582,8 +838,8 @@ server.tool('karea_recap', 'Return a summary of recent activity (tasks created, 
   return { content: [{ type: 'text', text: sections.join('\n') || 'No recent activity.' }] }
 })
 
-// Get task markdown — the task's knowledge base.
-server.tool('karea_get_markdown', 'Read the markdown document attached to a task. This is the task\'s knowledge base — it contains investigation findings, technical and functional documentation, root cause analysis, solution design, implementation notes, and any other long-form content the task has accumulated. Always read this before working on a task to avoid duplicating past research.', {
+// Get task markdown - the task's knowledge base.
+server.tool('karea_get_markdown', 'Read the markdown document attached to a task. This is the task\'s knowledge base - it contains investigation findings, technical and functional documentation, root cause analysis, solution design, implementation notes, and any other long-form content the task has accumulated. Always read this before working on a task to avoid duplicating past research.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
 }, async ({ task, projectId }) => {
@@ -593,8 +849,8 @@ server.tool('karea_get_markdown', 'Read the markdown document attached to a task
   return { content: [{ type: 'text', text: `# ${data.title}\n\n${body}` }] }
 })
 
-// Set task markdown — overwrites the markdown field with the provided content.
-server.tool('karea_set_markdown', 'Write the markdown document for a task. Overwrites any existing content. Use this to persist: investigation findings and research, technical documentation (architecture, APIs, schemas), functional documentation (requirements, acceptance criteria, user flows), root cause analysis and debugging logs, solution design — planned or implemented, risks, trade-offs, and open questions. This is the single source of truth for everything learned about this task. Always append to existing content (read first with karea_get_markdown) rather than replacing it, unless restructuring.', {
+// Set task markdown - overwrites the markdown field with the provided content.
+server.tool('karea_set_markdown', 'Write the markdown document for a task. Overwrites any existing content. Use this to persist: investigation findings and research, technical documentation (architecture, APIs, schemas), functional documentation (requirements, acceptance criteria, user flows), root cause analysis and debugging logs, solution design - planned or implemented, risks, trade-offs, and open questions. This is the single source of truth for everything learned about this task. Always append to existing content (read first with karea_get_markdown) rather than replacing it, unless restructuring.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   markdown: z.string().describe('The full markdown content to store on the task. Pass empty string to clear.'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
@@ -607,8 +863,8 @@ server.tool('karea_set_markdown', 'Write the markdown document for a task. Overw
   return { content: [{ type: 'text', text: `Updated markdown on "${data.title}" (${(data.markdown || '').length} chars).${linkNote || ''}` }] }
 })
 
-// Read task Context — the AI-facing cross-session scratchpad.
-server.tool('karea_get_context', 'Read the task\'s Context — titled entries of AI working memory that hold the FULL HISTORY of a task (not just its current state): what was tried, decided, discovered, and abandoned along the way. ALWAYS read this first when picking a task up so you inherit the journey instead of re-deriving it. Each entry shows who/when/how (user or mcp) it was created and last edited. When you learn something new, ADD to the relevant entry with karea_set_context — do not overwrite the history. Distinct from notes (human-readable updates) and the markdown doc (long-form documentation).', {
+// Read task Context - the AI-facing cross-session scratchpad.
+server.tool('karea_get_context', 'Read the task\'s Context - titled entries of AI working memory that hold the FULL HISTORY of a task (not just its current state): what was tried, decided, discovered, and abandoned along the way. ALWAYS read this first when picking a task up so you inherit the journey instead of re-deriving it. Each entry shows who/when/how (user or mcp) it was created and last edited. When you learn something new, ADD to the relevant entry with karea_set_context - do not overwrite the history. Distinct from notes (human-readable updates) and the markdown doc (long-form documentation).', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
 }, async ({ task, projectId }) => {
@@ -616,15 +872,15 @@ server.tool('karea_get_context', 'Read the task\'s Context — titled entries of
   const data = await karea.getContext(task, pid)
   const entries = Array.isArray(data.entries) ? data.entries : []
   if (entries.length === 0) {
-    return { content: [{ type: 'text', text: `# Context: ${data.title}\n\n${data.context || '(empty — write your plan/findings here with karea_set_context)'}` }] }
+    return { content: [{ type: 'text', text: `# Context: ${data.title}\n\n${data.context || '(empty - write your plan/findings here with karea_set_context)'}` }] }
   }
   const parts = entries.map((e: any) =>
     `## ${e.title}  [${e.lastEditedMode || e.createdMode}, updated ${e.updatedAt ? new Date(e.updatedAt).toISOString().slice(0, 16).replace('T', ' ') : '?'}${e.lastEditedBy ? ` by ${e.lastEditedBy}` : ''}]\n\n${e.content}`)
   return { content: [{ type: 'text', text: `# Context: ${data.title} (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})\n\n${parts.join('\n\n---\n\n')}` }] }
 })
 
-// Write task Context — upserts a titled entry of the AI scratchpad.
-server.tool('karea_set_context', 'Write a titled entry of the task\'s Context — the AI-facing cross-session working memory. Context tracks the FULL HISTORY of a task, not just its current state: what was tried, what worked, what failed, what was decided and why. Update incrementally so the journey is preserved (never overwrite the whole entry with "current status" — read first with karea_get_context, append/refine, then write back). Context is your DEFAULT save target: after every plan, finding, decision, or gotcha, persist it here proactively under titles like "Plan", "Findings", "Decisions", "Gotchas", "Attempted". Upserts by title: same title overwrites THAT entry only; other entries are untouched. Pass empty context to delete the entry. Use karea_add_note only for human-facing updates and karea_set_markdown for long-form docs — but keep Context up to date either way.', {
+// Write task Context - upserts a titled entry of the AI scratchpad.
+server.tool('karea_set_context', 'Write a titled entry of the task\'s Context - the AI-facing cross-session working memory. Context tracks the FULL HISTORY of a task, not just its current state: what was tried, what worked, what failed, what was decided and why. Update incrementally so the journey is preserved (never overwrite the whole entry with "current status" - read first with karea_get_context, append/refine, then write back). Context is your DEFAULT save target: after every plan, finding, decision, or gotcha, persist it here proactively under titles like "Plan", "Findings", "Decisions", "Gotchas", "Attempted". Upserts by title: same title overwrites THAT entry only; other entries are untouched. Pass empty context to delete the entry. Use karea_add_note only for human-facing updates and karea_set_markdown for long-form docs - but keep Context up to date either way.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   context: z.string().describe('The full content for this entry. Pass empty string to delete the entry.'),
   title: z.string().optional().describe('Entry title (e.g. "Plan", "Findings", "Decisions"). Defaults to "General".'),
@@ -716,11 +972,17 @@ server.tool('karea_delete_question', 'Permanently delete an open question. Irrev
 })
 
 // List resources
-server.tool('karea_list_resources', 'List resources (text notes & files). With a projectId it returns every resource belonging to that project - whether assigned to it directly, linked to one of its tasks, or filed under a folder named after the project (e.g. knowledge-base docs). Omit projectId to list all your resources, including unfiled ones.', {
+server.tool('karea_list_resources', 'List resources (text notes & files). With a projectId it returns every resource belonging to that project - whether assigned to it directly, linked to one of its tasks, or filed under a folder named after the project (e.g. knowledge-base docs). Omit projectId to list all your resources, including unfiled ones. All filters combine freely (name query, folder, type, mime, size range).', {
   projectId: z.string().optional().describe('Project name or ID. Omit to list ALL your resources (including unfiled / knowledge-base items not tied to any task).'),
-}, async ({ projectId }) => {
+  query: z.string().optional().describe('Fuzzy match against resource name.'),
+  folder: z.string().optional().describe('Exact folder path (case-insensitive) - e.g. "docs/api".'),
+  type: z.string().optional().describe('"text" for markdown/plain-text resources, "file" for uploaded files.'),
+  mime: z.string().optional().describe('Substring match against MIME type - e.g. "pdf", "image/png", "video".'),
+  minSize: z.number().int().optional().describe('Minimum size in bytes.'),
+  maxSize: z.number().int().optional().describe('Maximum size in bytes.'),
+}, async ({ projectId, query, folder, type, mime, minSize, maxSize }) => {
   const pid = await resolveProject(projectId)
-  const resources = await karea.listResources(pid)
+  const resources = await karea.listResources({ projectId: pid, query, folder, type, mime, minSize, maxSize })
   if (!resources.length) return { content: [{ type: 'text', text: 'No resources found.' }] }
 
   const lines = resources.map((r: any) => {
@@ -735,8 +997,12 @@ server.tool('karea_list_resources', 'List resources (text notes & files). With a
   return { content: [{ type: 'text', text: lines.join('\n\n') }] }
 })
 
-// Get resource content
-server.tool('karea_get_resource', 'Return a text resource with its full content and metadata, by ID. Read-only.', {
+// Get resource content - text OR binary. Text resources return their content
+// inline. Binary/file resources return an MCP `image` block for images, or a
+// base64 payload for other file types (PDFs, docs, etc.), so the agent can
+// actually read attached files. Size-capped to protect the tool response.
+const MAX_BINARY_INLINE_BYTES = 8 * 1024 * 1024 // 8 MB
+server.tool('karea_get_resource', 'Return a resource with its full content and metadata, by ID. Works for BOTH text and binary/file resources: text is returned inline; images are returned as an MCP image content block so the agent can view them; other file types (PDF, docs, etc.) are returned as base64 bytes with their MIME type. Files above 8 MB return metadata + a note telling the agent to fetch the download URL directly (too large to inline). Read-only.', {
   resourceId: z.string().describe('Resource UUID'),
 }, async ({ resourceId }) => {
   const resource = await karea.getResource(resourceId)
@@ -758,7 +1024,31 @@ server.tool('karea_get_resource', 'Return a text resource with its full content 
   if (resource.type === 'text') {
     return { content: [{ type: 'text', text: `${header}\n\n---\n\n${resource.textContent || '(empty)'}` }] }
   }
-  return { content: [{ type: 'text', text: `${header}\n\nBinary file - cannot display content.` }] }
+  // Binary/file resource - try to inline the bytes.
+  const sizeBytes = Number(resource.sizeBytes) || 0
+  if (sizeBytes > MAX_BINARY_INLINE_BYTES) {
+    return { content: [{ type: 'text', text: `${header}\n\nFile is ${sizeBytes} bytes - above the ${MAX_BINARY_INLINE_BYTES}-byte inline cap. Fetch directly: GET /api/resources/${resource.id}?inline=1 with your Karea API key (Bearer).` }] }
+  }
+  try {
+    const { base64, mimeType, sizeBytes: actual } = await karea.downloadResourceBytes(resource.id)
+    const isImage = /^image\//i.test(mimeType) || /^image\//i.test(resource.mimeType || '')
+    if (isImage) {
+      return {
+        content: [
+          { type: 'text', text: `${header}\n\n(image inlined below, ${actual} bytes)` },
+          { type: 'image', data: base64, mimeType },
+        ],
+      }
+    }
+    // Non-image binary: return base64 so the agent can decode it locally.
+    return {
+      content: [
+        { type: 'text', text: `${header}\n\n---\n\nBinary content, ${actual} bytes, base64 (mimeType=${mimeType}):\n\n${base64}` },
+      ],
+    }
+  } catch (err: any) {
+    return { content: [{ type: 'text', text: `${header}\n\nBinary file - failed to download bytes: ${err?.message || err}` }] }
+  }
 })
 
 // Create text resource
@@ -819,7 +1109,7 @@ server.tool('karea_upload_resource', 'Upload a binary file as a resource (base64
 })
 
 // Resolve a task identifier (UUID, visual ID, or name) to a UUID. Throws a
-// clear message if the visual ID can't be resolved — otherwise downstream
+// clear message if the visual ID can't be resolved - otherwise downstream
 // callers would forward the raw string as a taskId and the server's Zod
 // `.uuid()` check would bubble up as a generic 500.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -999,10 +1289,10 @@ server.tool('karea_create_subtask', 'Create a subtask under a parent task. Accep
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
   description: z.string().optional().describe('Subtask description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short.'),
-  markdown: z.string().optional().describe('Long-form markdown content — investigation findings, technical/functional docs, solution design, root cause analysis.'),
+  markdown: z.string().optional().describe('Long-form markdown content - investigation findings, technical/functional docs, solution design, root cause analysis.'),
   source: z.string().optional().describe('Where this subtask came from'),
   closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing. Keep each one short and concrete - 1 short sentence, ideally under ~120 chars (e.g. "Tests pass in CI", "PR approved"). Do NOT write paragraphs.'),
-  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (verify with karea_view_task or the project list). Do NOT invent new tags unless the user explicitly asked for one — a typo or a paraphrase spawns duplicate tags. When unsure, omit and ask the user.'),
+  tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (verify with karea_view_task or the project list). Do NOT invent new tags unless the user explicitly asked for one - a typo or a paraphrase spawns duplicate tags. When unsure, omit and ask the user.'),
   jiraIssueKey: z.string().optional().describe('JIRA issue key to link (e.g. PROJ-123). Issue must exist in JIRA.'),
   projectId: z.string().optional().describe('Project name or ID (needed if parent is a visual ID)'),
   ...sessionLinkFields,
@@ -1080,7 +1370,7 @@ server.tool('karea_list_subtasks', 'List subtasks of a parent task. Accepts the 
     const display = prefix && s.seq != null ? `${prefix}${s.seq} ` : ''
     return `  ${display}[${s.status}] P${s.priority} ${s.title} (id: ${s.id})`
   })
-  const header = `Subtasks of ${parentVisualId ? parentVisualId + ' · ' : ''}"${parentData.title}" (id: ${parentData.id}) — ${subs.length} subtask${subs.length === 1 ? '' : 's'}`
+  const header = `Subtasks of ${parentVisualId ? parentVisualId + ' · ' : ''}"${parentData.title}" (id: ${parentData.id}) - ${subs.length} subtask${subs.length === 1 ? '' : 's'}`
   return { content: [{ type: 'text', text: `${header}:\n${lines.join('\n')}` }] }
 })
 
@@ -1178,6 +1468,277 @@ server.tool('karea_unlink_jira', 'Remove the JIRA link from a Karea task', {
   const taskData = await karea.getTask(taskId)
   await karea.unlinkJira(taskData.id)
   return { content: [{ type: 'text', text: `Removed JIRA link from "${taskData.title}".` }] }
+})
+
+// ─────────────────────────────────────────────────────────────────────────
+// KA422 - Reminders
+// Full CRUD + a "check" tool that agents can call anytime, plus snooze /
+// dismiss / mark-done actions. Every other karea MCP tool also auto-appends
+// a "Pending reminders" footer (see wrapper above) so a live reminder is
+// surfaced on the very next tool call.
+// ─────────────────────────────────────────────────────────────────────────
+
+function formatReminderLine(r: any): string {
+  const t = r.task || {}
+  const display = t.project?.prefix && typeof t.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t.id || '').slice(0, 6)}`
+  const when = new Date(r.fireAt).toLocaleString()
+  const title = r.title || t.title || 'Reminder'
+  const bits = [`[${r.id}] ${display} - ${title} · fires ${when} · status ${r.status}`]
+  if (r.repeat) bits.push(`repeat ${r.repeat}`)
+  if (r.emailOptIn) bits.push('email on')
+  return bits.join(' · ')
+}
+
+server.tool('karea_check_reminders', 'Return the caller\'s upcoming and past-due reminders. Use this when the user asks "what reminders do I have?" or before doing focused work so you know what will interrupt them. Also useful to look up a reminder id for karea_snooze_reminder / karea_dismiss_reminder / karea_mark_reminder_done. Read-only.', {
+  taskId: z.string().optional().describe('Only list reminders on this task (visual ID, name, or UUID).'),
+  includeDone: z.boolean().optional().describe('Include dismissed / done / cancelled reminders too. Default false.'),
+}, async ({ taskId, includeDone }) => {
+  let tid: string | undefined = undefined
+  if (taskId) {
+    const t = await karea.getTask(taskId)
+    tid = t.id
+  }
+  const items = await karea.listReminders({ taskId: tid, includeDone: !!includeDone })
+  if (items.length === 0) return { content: [{ type: 'text', text: 'No reminders.' }] }
+  const lines = ['Reminders:', ...items.map((r: any) => `  · ${formatReminderLine(r)}`)]
+  return { content: [{ type: 'text', text: lines.join('\n') }] }
+})
+
+server.tool('karea_create_reminder', 'Schedule a reminder on a task. The reminder fires with a full-screen in-app modal at fireAt (always on); optionally also emails the user. Title falls back to the task title when omitted.', {
+  task: z.string().describe('Task ref (visual ID, name, or UUID).'),
+  fireAt: z.string().describe('When the reminder fires - ISO 8601 datetime (e.g. "2026-07-28T09:00:00Z") or a friendly form like "2d", "5h", "tomorrow 9am".'),
+  title: z.string().optional().describe('Optional title shown on the fire modal. Falls back to the task title.'),
+  emailOptIn: z.boolean().optional().describe('Also email the user when it fires. Default false (in-app only).'),
+}, async (params) => {
+  const t = await karea.getTask(params.task)
+  // Accept ISO OR delegate to the app's SLA parser via a shortcut task-edit trick:
+  // easier: parse relative forms locally with a light heuristic; ISO passes through.
+  let fireIso = params.fireAt
+  if (!/^\d{4}-\d{2}-\d{2}/.test(fireIso)) {
+    // Ask the app to normalise via /sla parsing: fall back to a small heuristic.
+    const now = Date.now()
+    const m = fireIso.match(/^(\d+)\s*(m|min|h|hr|hour|d|day|w|week)s?$/i)
+    if (m) {
+      const n = parseInt(m[1], 10)
+      const unit = m[2].toLowerCase()
+      const ms = unit.startsWith('m') && unit !== 'mo' ? n * 60_000
+        : unit.startsWith('h') ? n * 3600_000
+        : unit.startsWith('d') ? n * 86_400_000
+        : n * 7 * 86_400_000
+      fireIso = new Date(now + ms).toISOString()
+    } else if (/^tomorrow(\s+\d{1,2}(:\d{2})?\s*(am|pm)?)?$/i.test(fireIso)) {
+      const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); fireIso = d.toISOString()
+    } else {
+      return { content: [{ type: 'text', text: `Could not parse fireAt "${params.fireAt}". Pass an ISO datetime or a form like "2h", "3d", "tomorrow 9am".` }] }
+    }
+  }
+  const rem = await karea.createReminder({
+    taskId: t.id,
+    title: params.title || null,
+    fireAt: fireIso,
+    emailOptIn: params.emailOptIn,
+  })
+  return { content: [{ type: 'text', text: `Reminder set on "${t.title}".\n  ${formatReminderLine({ ...rem, task: t })}` }] }
+})
+
+server.tool('karea_snooze_reminder', 'Snooze a firing reminder by N minutes. The modal closes; the reminder re-fires after the snooze window.', {
+  reminderId: z.string().describe('Reminder id (from karea_check_reminders or the pending-reminder nudge attached to any tool response).'),
+  minutes: z.number().int().min(1).max(60 * 24 * 7).describe('How many minutes to snooze.'),
+}, async ({ reminderId, minutes }) => {
+  const rem = await karea.patchReminder(reminderId, { action: 'snooze', snoozeMinutes: minutes })
+  return { content: [{ type: 'text', text: `Snoozed reminder ${reminderId} for ${minutes} min → next fire ${new Date(rem.fireAt).toLocaleString()}.` }] }
+})
+
+server.tool('karea_dismiss_reminder', 'Dismiss a reminder - cancels it so it will not fire again.', {
+  reminderId: z.string().describe('Reminder id.'),
+}, async ({ reminderId }) => {
+  await karea.patchReminder(reminderId, { action: 'dismiss' })
+  return { content: [{ type: 'text', text: `Reminder ${reminderId} dismissed.` }] }
+})
+
+server.tool('karea_mark_reminder_done', 'Fulfill a reminder: closes both the reminder AND the underlying task (status = done).', {
+  reminderId: z.string().describe('Reminder id.'),
+}, async ({ reminderId }) => {
+  const rem = await karea.patchReminder(reminderId, { action: 'done' })
+  if (rem?.taskId) {
+    try { await karea.sendCommand(`/ct ${rem.taskId}`) } catch {}
+  }
+  return { content: [{ type: 'text', text: `Reminder ${reminderId} marked done + task closed.` }] }
+})
+
+// ─── Meetings (KA465) ──────────────────────────────────────────────────────
+// The meetings feature (KA433) shipped to production with no MCP surface at
+// all. These wrap /api/meetings and its link endpoints.
+//
+// Meetings belong to a USER, not a project - a person's calendar spans
+// projects - so `projectId` is an optional association, never a lookup scope.
+
+// Shared renderer so list and view agree on how a meeting reads.
+function meetingLine(m: any): string {
+  const when = m.startAt ? new Date(m.startAt).toISOString().replace('T', ' ').slice(0, 16) : '?'
+  const proj = m.project?.name ? ` [${m.project.name}]` : ''
+  const where = m.location ? ` @ ${m.location}` : ''
+  return `${when} - ${m.title}${proj}${where} (id: ${m.id})`
+}
+
+server.tool('karea_list_meetings', 'List meetings. Defaults to ALL meetings; narrow with scope="upcoming" (ends in the future) or scope="past", a from/to date window, or a project. Meetings belong to the user, not to a project - projectId only filters those explicitly filed under it. Read-only.', {
+  scope: z.enum(['upcoming', 'past']).optional().describe('"upcoming" = ends in the future, "past" = already ended. Omit for all.'),
+  from: z.string().optional().describe('Only meetings starting at/after this ISO datetime (e.g. "2026-09-14T00:00:00Z").'),
+  to: z.string().optional().describe('Only meetings starting at/before this ISO datetime.'),
+  projectId: z.string().optional().describe('Project name or ID to filter by.'),
+}, async (params) => {
+  const pid = params.projectId ? await resolveProject(params.projectId) : undefined
+  const data = await karea.listMeetings({ scope: params.scope, from: params.from, to: params.to, projectId: pid })
+  const meetings = data.meetings || []
+  if (meetings.length === 0) return { content: [{ type: 'text', text: 'No meetings found.' }] }
+  const lines = meetings.map((m: any) => {
+    const qs = (m.questions || []).length
+    const extra = qs > 0 ? ` - ${qs} open question(s)` : ''
+    return `- ${meetingLine(m)}${extra}`
+  })
+  return { content: [{ type: 'text', text: `Meetings (${meetings.length}):\n${lines.join('\n')}` }] }
+})
+
+server.tool('karea_view_meeting', 'Return one meeting in full: time, location, project, attendees, prep notes, transcript, linked tasks and linked open questions. Read-only.', {
+  meetingId: z.string().describe('Meeting UUID (from karea_list_meetings).'),
+}, async ({ meetingId }) => {
+  const data = await karea.getMeeting(meetingId)
+  const m = data.meeting || data
+  const parts = [meetingLine(m)]
+  if (m.endAt) parts.push(`Ends: ${new Date(m.endAt).toISOString().replace('T', ' ').slice(0, 16)}`)
+  if (m.description) parts.push(`\nDescription:\n${m.description}`)
+  const attendees = Array.isArray(m.attendees) ? m.attendees : []
+  if (attendees.length) {
+    parts.push(`\nAttendees (${attendees.length}):\n` + attendees.map((a: any) =>
+      `  - ${a.name || a.email || 'unknown'}${a.email && a.name ? ` <${a.email}>` : ''}${a.optional ? ' (optional)' : ''}`).join('\n'))
+  }
+  const questions = (m.questions || []).map((q: any) => q.question || q).filter(Boolean)
+  if (questions.length) {
+    parts.push(`\nOpen Questions (${questions.length}):\n` + questions.map((q: any) =>
+      `  - [${q.status}] ${q.question} (id: ${q.id})`).join('\n'))
+  }
+  // Linked tasks live on their own endpoint, not on the meeting record.
+  try {
+    const t = await karea.getMeetingTasks(meetingId)
+    const tasks = t.tasks || []
+    if (tasks.length) {
+      parts.push(`\nLinked Tasks (${tasks.length}):\n` + tasks.map((x: any) => {
+        const did = x.project?.prefix && x.seq != null ? `${x.project.prefix}${x.seq}` : x.id
+        return `  - ${did} ${x.title} [${x.status}]`
+      }).join('\n'))
+    }
+  } catch { /* supplementary */ }
+  if (m.notes) parts.push(`\nPrep notes:\n${m.notes}`)
+  if (m.transcript) parts.push(`\nTranscript:\n${m.transcript}`)
+  parts.push(...recordFooter('meeting', { id: m.id }))
+  return { content: [{ type: 'text', text: parts.join('\n') }] }
+})
+
+server.tool('karea_create_meeting', 'Create a meeting. startAt and endAt are REQUIRED ISO datetimes and the meeting must end after it starts. Filing it under a project is optional - meetings belong to the user.', {
+  title: z.string().describe('Meeting title.'),
+  startAt: z.string().describe('ISO datetime the meeting starts, e.g. "2026-09-15T10:00:00Z".'),
+  endAt: z.string().describe('ISO datetime the meeting ends. Must be after startAt.'),
+  description: z.string().optional().describe('What the meeting is about.'),
+  location: z.string().optional().describe('Room, address, or call link.'),
+  projectId: z.string().optional().describe('Project name or ID to file this meeting under (optional).'),
+  notes: z.string().optional().describe('Prep notes (markdown): agenda, talking points, things to raise.'),
+  attendees: z.array(z.object({
+    name: z.string().optional(),
+    email: z.string().optional(),
+    optional: z.boolean().optional(),
+  })).optional().describe('Attendee list.'),
+}, async (params) => {
+  const pid = params.projectId ? await resolveProject(params.projectId) : undefined
+  const data = await karea.createMeeting({
+    title: params.title,
+    startAt: params.startAt,
+    endAt: params.endAt,
+    description: params.description,
+    location: params.location,
+    projectId: pid ?? null,
+    notes: params.notes,
+    attendees: params.attendees,
+  })
+  const m = data.meeting || data
+  const parts = [`Meeting "${m.title}" created.`, meetingLine(m), ...recordFooter('meeting', { id: m.id })]
+  return { content: [{ type: 'text', text: parts.join('\n') }] }
+})
+
+server.tool('karea_edit_meeting', 'Update a meeting. Only the fields you pass change. Note the API validates the RESULTING window, so moving only endAt cannot push it before an untouched startAt.', {
+  meetingId: z.string().describe('Meeting UUID.'),
+  title: z.string().optional().describe('New title.'),
+  startAt: z.string().optional().describe('New ISO start datetime.'),
+  endAt: z.string().optional().describe('New ISO end datetime.'),
+  description: z.string().optional().describe('New description.'),
+  location: z.string().optional().describe('New location.'),
+  projectId: z.string().optional().describe('Move the meeting under this project (name or ID).'),
+  notes: z.string().optional().describe('Replace the prep notes (markdown).'),
+  transcript: z.string().optional().describe('Paste the meeting transcript.'),
+}, async (params) => {
+  const pid = params.projectId ? await resolveProject(params.projectId) : undefined
+  const payload: Record<string, unknown> = {}
+  if (params.title !== undefined) payload.title = params.title
+  if (params.startAt !== undefined) payload.startAt = params.startAt
+  if (params.endAt !== undefined) payload.endAt = params.endAt
+  if (params.description !== undefined) payload.description = params.description
+  if (params.location !== undefined) payload.location = params.location
+  if (pid !== undefined) payload.projectId = pid
+  if (params.notes !== undefined) payload.notes = params.notes
+  if (params.transcript !== undefined) payload.transcript = params.transcript
+  if (Object.keys(payload).length === 0) {
+    return { content: [{ type: 'text', text: 'Nothing to update - pass at least one field.' }] }
+  }
+  const data = await karea.updateMeeting(params.meetingId, payload)
+  const m = data.meeting || data
+  const changed = Object.keys(payload).join(', ')
+  return { content: [{ type: 'text', text: [`Meeting updated (${changed}).`, meetingLine(m), ...recordFooter('meeting', { id: m.id })].join('\n') }] }
+})
+
+server.tool('karea_delete_meeting', 'Delete a meeting permanently. Linked tasks and open questions are NOT deleted - they outlive the meeting, only the links go. Requires confirm=true.', {
+  meetingId: z.string().describe('Meeting UUID.'),
+  confirm: z.boolean().describe('Must be true. Guard against deleting a meeting by accident.'),
+}, async ({ meetingId, confirm }) => {
+  if (!confirm) return { content: [{ type: 'text', text: 'Not deleted: pass confirm=true to delete this meeting.' }] }
+  await karea.deleteMeeting(meetingId)
+  return { content: [{ type: 'text', text: `Meeting ${meetingId} deleted. Linked tasks and questions were kept.` }] }
+})
+
+server.tool('karea_link_task_to_meeting', 'Link an EXISTING task to a meeting (discussed at / arising from it). Accepts a task name, visual ID (KA123) or UUID. Unlinking later keeps the task.', {
+  meetingId: z.string().describe('Meeting UUID.'),
+  task: z.string().describe('Task name, visual ID (KA123), or UUID.'),
+  projectId: z.string().optional().describe('Project name or ID - helps resolve a visual ID.'),
+}, async ({ meetingId, task, projectId }) => {
+  const pid = await resolveProject(projectId)
+  const taskId = await resolveTaskId(task, pid)
+  await karea.linkTaskToMeeting(meetingId, taskId)
+  return { content: [{ type: 'text', text: `Linked task ${task} to meeting ${meetingId}.` }] }
+})
+
+server.tool('karea_unlink_task_from_meeting', 'Remove the link between a task and a meeting. The task itself is untouched.', {
+  meetingId: z.string().describe('Meeting UUID.'),
+  task: z.string().describe('Task name, visual ID, or UUID.'),
+  projectId: z.string().optional().describe('Project name or ID - helps resolve a visual ID.'),
+}, async ({ meetingId, task, projectId }) => {
+  const pid = await resolveProject(projectId)
+  const taskId = await resolveTaskId(task, pid)
+  await karea.unlinkTaskFromMeeting(meetingId, taskId)
+  return { content: [{ type: 'text', text: `Unlinked task ${task} from meeting ${meetingId} (the task was kept).` }] }
+})
+
+server.tool('karea_link_question_to_meeting', 'Link an EXISTING open question to a meeting, so it is raised there. Use karea_list_questions to find the id. The question outlives the meeting.', {
+  meetingId: z.string().describe('Meeting UUID.'),
+  questionId: z.string().describe('Open question UUID (from karea_list_questions).'),
+}, async ({ meetingId, questionId }) => {
+  await karea.linkQuestionToMeeting(meetingId, questionId)
+  return { content: [{ type: 'text', text: `Linked question ${questionId} to meeting ${meetingId}.` }] }
+})
+
+server.tool('karea_unlink_question_from_meeting', 'Remove the link between an open question and a meeting. The question itself is kept.', {
+  meetingId: z.string().describe('Meeting UUID.'),
+  questionId: z.string().describe('Open question UUID.'),
+}, async ({ meetingId, questionId }) => {
+  await karea.unlinkQuestionFromMeeting(meetingId, questionId)
+  return { content: [{ type: 'text', text: `Unlinked question ${questionId} from meeting ${meetingId} (the question was kept).` }] }
 })
 
 // Start the server

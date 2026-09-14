@@ -38,7 +38,7 @@ async function main() {
   const vt = tools.tools.find((t) => t.name === 'karea_view_task')
   T(!!vt?.inputSchema?.properties?.includeContext, 'karea_view_task exposes includeContext param')
 
-  // Call without includeContext — should include HINT that context exists
+  // Call without includeContext - should include HINT that context exists
   const noCtx = await client.callTool({
     name: 'karea_view_task',
     arguments: { task: TASK_ID, projectId: PROJECT_ID },

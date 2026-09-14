@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // KA328 v2: exercise a large Context set + retrieve via the live MCP.
 // Sets ~50KB of context via karea_set_context, then reads it back with
-// karea_get_context AND karea_view_task { includeContext: true } — asserts
+// karea_get_context AND karea_view_task { includeContext: true } - asserts
 // full byte-for-byte fidelity of a big blob (headings, code fences, unicode,
 // long lines).
 import { spawn } from 'node:child_process'
