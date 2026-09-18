@@ -549,7 +549,7 @@ registerTool('karea_doing', 'Create a task you are working on right now (status:
 })
 
 // View task details
-registerTool('karea_view_task', 'Return one task with all its details (status, priority, deadline, category, description, notes, requisites, links), located by visual ID, name or UUID. Pass includeContext=true to also inline the task\'s AI Context in the response - avoids a follow-up karea_get_context round-trip. Read-only.', {
+registerTool('karea_view_task', 'Return one task with all its details (status, priority, deadline, recurrence, category, description, notes, requisites, links), located by visual ID, name or UUID. Pass includeContext=true to also inline the task\'s AI Context in the response - avoids a follow-up karea_get_context round-trip. Read-only.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
   includeContext: z.boolean().optional().describe('If true, inline the task\'s AI Context (cross-session working memory) in this response. Default false; when false, the response instead hints that Context exists and can be fetched with karea_get_context.'),
