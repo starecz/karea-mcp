@@ -18,7 +18,8 @@
  * Run automatically before `npm publish` via the prepublishOnly hook,
  * or manually any time you add/remove a tool: `npm run sync-metadata`.
  */
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -26,7 +27,14 @@ const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-const src = readFileSync(join(root, 'src/index.ts'), 'utf8')
+// KA395 moved every registerTool() call and the group table out of index.ts
+// into tools.ts, so index.ts could become a thin stdio entrypoint and the
+// hosted HTTP endpoint could import the same registry. Reading index.ts here
+// would now find zero actions, and the 3-15 guard below would refuse to run.
+// Both are read so this keeps working whichever file they end up in.
+const src = ['src/tools.ts', 'src/index.ts']
+  .map((rel) => { try { return readFileSync(join(root, rel), 'utf8') } catch { return '' } })
+  .join('\n')
 
 // KA323: two different numbers now, and the distinction matters.
 //   actions - the 64 operations, each registered with registerTool()
@@ -255,5 +263,24 @@ for (const rel of ['public/karea-skill/SKILL.md', 'claude-skill/SKILL.md']) {
 }
 
 console.log(`[sync-metadata] wrote help page data + 2 skill catalogues`)
+
+// KA515: rebuild the downloadable skill tarball.
+//
+// This used to be made by hand, which is precisely why it sat two months stale
+// while SKILL.md moved on - anyone who downloaded it got a catalogue of 64
+// tools that no longer existed. Generating it here means the file the user
+// downloads and the file this script just wrote cannot disagree.
+const skillDir = join(appRoot, 'public/karea-skill')
+const tarball = join(appRoot, 'public/karea-claude-skill.tar.gz')
+try {
+  // Plain flags only: this runs under busybox tar in the node:alpine container
+  // as often as under GNU tar, and busybox has no --sort or --owner.
+  execFileSync('tar', ['-czf', tarball, '-C', join(appRoot, 'public'), 'karea-skill'])
+  const { size } = statSync(tarball)
+  console.log(`[sync-metadata] wrote public/karea-claude-skill.tar.gz (${size} bytes)`)
+} catch (err) {
+  console.error(`[sync-metadata] could not build the skill tarball: ${err.message}`)
+  process.exit(1)
+}
 
 console.log(`[sync-metadata] wrote server.json, smithery.yaml, README.md (${toolCount} tools)`)

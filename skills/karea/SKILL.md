@@ -20,11 +20,18 @@ Karea is a keyboard-first task manager at [karea.app](https://karea.app). This s
 
 ## Tools available via the `karea` MCP
 
-The user's API key is configured in their MCP config (`KAREA_API_KEY`).
+There are two ways the user may be connected, and they behave identically once
+you are talking to Karea:
+
+- **Local (npm)** - `karea-mcp` over stdio, with `KAREA_API_KEY` in their MCP
+  config. This is the power-user path and supports `KAREA_MCP_LEGACY_TOOLS`.
+- **Hosted (KA395)** - the connector at `https://karea.app/api/mcp`, added in
+  Claude's connector settings and authorised in a browser with OAuth. Nothing
+  is installed, so this is the only option on mobile.
 
 <!-- SYNC:TOOL_CATALOGUE -->
 The server advertises **12 tools** (one per noun, plus `karea_help`), covering
-**64 actions**. Every tool takes `{ action, params }`:
+**68 actions**. Every tool takes `{ action, params }`:
 
 ```json
 { "action": "karea_create_task", "params": { "name": "Fix the navbar", "priority": 1 } }
@@ -36,8 +43,8 @@ The server advertises **12 tools** (one per noun, plus `karea_help`), covering
   - `karea_list_tasks`, `karea_view_task`, `karea_view_tasks`, `karea_create_task`, `karea_edit_task`, `karea_close_task`, `karea_delete_task`, `karea_quick_task`, `karea_doing`, `karea_done`
 - `karea_subtasks` - Subtasks and closing requisites - the checklist a task has to satisfy before it can be closed.
   - `karea_create_subtask`, `karea_list_subtasks`, `karea_add_requisite`, `karea_toggle_requisite`, `karea_delete_requisite`
-- `karea_notes` - Notes on a task - human-readable updates the user reads. For private cross-session memory use karea_docs (set_context).
-  - `karea_list_notes`, `karea_add_note`, `karea_edit_note`, `karea_delete_note`
+- `karea_notes` - Notes on a task - human-readable updates the user reads - plus the sticky-note scratch board. For private cross-session memory use karea_docs (set_context).
+  - `karea_list_notes`, `karea_add_note`, `karea_edit_note`, `karea_delete_note`, `karea_list_sticky_notes`, `karea_create_sticky_note`, `karea_edit_sticky_note`, `karea_delete_sticky_note`
 - `karea_docs` - A task's long-form markdown document and its AI Context (private working memory that survives across sessions).
   - `karea_get_markdown`, `karea_set_markdown`, `karea_get_context`, `karea_set_context`
 - `karea_questions` - Open questions: things you are waiting on an answer for. Create, answer, edit, delete.
@@ -55,7 +62,7 @@ The server advertises **12 tools** (one per noun, plus `karea_help`), covering
 - `karea_help` - full parameter schema for any action.
 
 Call `karea_help` with an action name for its full parameter schema. Set
-`KAREA_MCP_LEGACY_TOOLS=1` to go back to 64 individual tools.
+`KAREA_MCP_LEGACY_TOOLS=1` to go back to 68 individual tools.
 <!-- /SYNC:TOOL_CATALOGUE -->
 
 ### Tasks
@@ -142,6 +149,54 @@ Task-scoped reminders. When a reminder fires, Karea shows a full-screen in-app m
 | `karea_mark_reminder_done` | Fulfill a reminder AND close the underlying task (status = done). |
 
 When you see the `⏰ Pending reminders:` footer, decide with the user before dismissing anything. Snoozing (`+15m`, `+1h`, `tomorrow`) is the safe default when the user is busy.
+
+### Meetings
+
+Called through `karea_meetings`.
+
+A meeting is a calendar event the user prepares for: it carries prep notes, an
+agenda of linked tasks, open questions to raise, and afterwards a transcript.
+Meetings belong to the **user**, not to a project, because a person's calendar
+spans projects - `projectId` is an optional filing, not ownership.
+
+| Action | Use for |
+|---|---|
+| `karea_list_meetings` | What is coming up, or what already happened. Filter by `scope` (`upcoming` / `past`), project, or date range. |
+| `karea_view_meeting` | One meeting in full: attendees, notes, linked tasks and questions, transcript. |
+| `karea_create_meeting` | Schedule one. `startAt` / `endAt` are ISO datetimes. |
+| `karea_edit_meeting` | Change the facts, or paste a transcript after the fact. |
+| `karea_delete_meeting` | Destructive. Confirm first. |
+| `karea_link_task_to_meeting` / `karea_unlink_task_from_meeting` | Put a task on the agenda, or take it off. Unlinking keeps both. |
+| `karea_link_question_to_meeting` / `karea_unlink_question_from_meeting` | Same, for an open question the user wants to raise there. |
+
+Two things worth knowing when you read a meeting back:
+
+- **It may repeat (KA506).** A recurring meeting is a series master carrying the
+  rule plus real occurrence rows pointing at it. Editing the schedule of a
+  master affects future occurrences and is destructive, so it is a decision for
+  the user, not for you.
+- **It may have a join link (KA512).** Meet / Zoom / Teams URLs are stored apart
+  from `location`, which stays free text for rooms.
+
+### Sticky notes
+
+Called through `karea_notes`, alongside the task notes.
+
+The scratch layer: no status, no assignee, no deadline, nothing to close. A
+command the user keeps re-typing, a URL they need for the next twenty minutes,
+three bullets before a call. **If it has a lifecycle, it is a task** - reach for
+`karea_create_task` instead. The board caps at 100.
+
+| Action | Use for |
+|---|---|
+| `karea_list_sticky_notes` | Read the board. Pass `projectId` to get that project's notes plus the global ones. |
+| `karea_create_sticky_note` | Jot something down. `content` is the body; `title` is very short (60 chars). Optional `color` and `projectId`. |
+| `karea_edit_sticky_note` | Change the text, colour, pin state, or which project it belongs to. |
+| `karea_delete_sticky_note` | Destructive and irreversible - there is no trash. Confirm unless the user asked for that note to go. |
+
+A note is **global** by default and follows the user everywhere; give it a
+`projectId` and it only appears inside that project. Markdown works in the body,
+and `@resource` mentions plus bare task IDs like `KA123` become links.
 
 ### AI Sessions
 

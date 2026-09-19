@@ -1,12 +1,37 @@
 const KAREA_URL = process.env.KAREA_URL || 'http://localhost:3002'
 const KAREA_API_KEY = process.env.KAREA_API_KEY || ''
 
+/**
+ * KA395: per-call credentials.
+ *
+ * Over stdio there is one user for the life of the process, so environment
+ * variables are fine. The hosted HTTP server serves many users concurrently
+ * from one process, and a module-level API key would mean every request
+ * racing to act as whoever configured the last one.
+ *
+ * AsyncLocalStorage carries the caller's identity down through every await
+ * without changing the signature of the sixty-odd functions below. The env
+ * vars stay as the fallback, so stdio behaviour is untouched.
+ */
+import { AsyncLocalStorage } from 'async_hooks'
+
+export interface KareaCallContext { baseUrl: string; apiKey: string }
+const callContext = new AsyncLocalStorage<KareaCallContext>()
+
+/** Run `fn` with these credentials. Everything it awaits inherits them. */
+export function withKareaContext<T>(ctx: KareaCallContext, fn: () => Promise<T>): Promise<T> {
+  return callContext.run(ctx, fn)
+}
+
 async function request(path: string, options: RequestInit = {}) {
-  const res = await fetch(`${KAREA_URL}${path}`, {
+  const ctx = callContext.getStore()
+  const baseUrl = ctx?.baseUrl || KAREA_URL
+  const apiKey = ctx?.apiKey || KAREA_API_KEY
+  const res = await fetch(`${baseUrl}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${KAREA_API_KEY}`,
+      'Authorization': `Bearer ${apiKey}`,
       ...options.headers,
     },
   })
@@ -164,8 +189,12 @@ export async function getResource(id: string) {
 // mime type. Uses the existing `?inline=1` handler which streams decrypted
 // R2 content back through the API.
 export async function downloadResourceBytes(id: string): Promise<{ base64: string; mimeType: string; sizeBytes: number }> {
-  const res = await fetch(`${KAREA_URL}/api/resources/${id}?inline=1`, {
-    headers: { 'Authorization': `Bearer ${KAREA_API_KEY}` },
+  // KA395: this one bypasses request() because it wants bytes, not JSON, so
+  // it has to read the per-call context itself or it would keep using the
+  // process-wide key on the hosted server.
+  const ctx = callContext.getStore()
+  const res = await fetch(`${ctx?.baseUrl || KAREA_URL}/api/resources/${id}?inline=1`, {
+    headers: { 'Authorization': `Bearer ${ctx?.apiKey || KAREA_API_KEY}` },
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
@@ -403,4 +432,26 @@ export async function unlinkQuestionFromMeeting(meetingId: string, questionId: s
 // karea_view_task has to ask for them separately.
 export async function getTaskMeetings(taskId: string) {
   return request(`/api/tasks/${taskId}/meetings`)
+}
+
+// KA510: sticky notes. The scratch layer - no status, no deadline, nothing to
+// close. Kept on the same client so an agent can jot something down without a
+// second transport.
+export async function listStickyNotes(projectId?: string) {
+  const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+  return request(`/api/sticky-notes${qs}`)
+}
+
+export async function createStickyNote(body: {
+  title?: string; content: string; color?: string; projectId?: string | null; pinned?: boolean
+}) {
+  return request('/api/sticky-notes', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export async function editStickyNote(id: string, body: Record<string, unknown>) {
+  return request(`/api/sticky-notes/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+}
+
+export async function deleteStickyNote(id: string) {
+  return request(`/api/sticky-notes/${id}`, { method: 'DELETE' })
 }

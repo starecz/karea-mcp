@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.starecz/karea-mcp",
-  "description": "Karea task manager - 12 tools covering 64 actions, for Claude Code, Cursor, and other MCP clients.",
+  "description": "Karea task manager - 12 tools covering 68 actions, for Claude Code, Cursor, and other MCP clients.",
   "status": "active",
   "repository": {
     "url": "https://github.com/starecz/karea-mcp",
