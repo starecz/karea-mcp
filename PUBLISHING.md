@@ -34,10 +34,35 @@ This is also wired into `prepublishOnly` so `npm publish` will not ship a stale 
    mcp-publisher login github   # one-time, opens device flow
    mcp-publisher publish        # reads server.json
    ```
-6. **Smithery** picks up automatically once registered, or:
+6. **Cut a GitHub Release on `starecz/karea-mcp`.** This is the step that was
+   missed for five versions - the repo sat at `v0.4.1` while npm was on 0.10.0.
+   Glama re-scores from that repo and a release is the signal there is something
+   new to look at, so without it the score never moves no matter what ships.
+   ```bash
+   cd /home/marouan/karea-mcp
+   gh release create v<version> --title "v<version> - <summary>" --notes "..."
+   ```
+7. **Smithery** picks up automatically once registered, or:
    ```bash
    npx -y @smithery/cli@latest mcp publish https://github.com/starecz/karea-mcp -n starecz/karea-mcp
    ```
+
+## The registry login is a device flow, not a local browser
+
+`mcp-publisher login github` prints a code and `https://github.com/login/device`,
+then blocks. **Nothing has to run a browser on this machine** - the code is
+entered from any device. Start it in the background, read the code out of its
+output, hand it over, and run `mcp-publisher publish` once it prints
+`Successfully authenticated!`.
+
+```bash
+cd /home/marouan/karea/mcp
+mcp-publisher login github > /tmp/mcp-login.log 2>&1 &
+sleep 6 && cat /tmp/mcp-login.log     # the code lives here
+```
+
+The code expires in about 15 minutes; if it lapses, kill the process and start
+again for a fresh one.
 
 ## Adding new metadata fields
 
