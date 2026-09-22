@@ -446,6 +446,63 @@ registerTool('karea_edit_task', 'Update fields of an existing task (title, statu
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
+/**
+ * KA540: the same change, applied to many tasks - in ONE request.
+ *
+ * The first version of this was a loop over `karea_edit_task`. That saved the
+ * agent round trips and saved the server none, which is not what "bulk"
+ * means: /api/chat allows 60 commands a minute, so a batch of any real size
+ * tripped the limiter, and the loop had to grow backoff-and-retry to survive
+ * a problem it was causing itself.
+ *
+ * It calls `/api/tasks/bulk` now: one request, one transaction, one
+ * rate-limit unit. References that do not resolve come back named, so one
+ * mistyped id in thirty costs you that one and not the batch.
+ */
+registerTool('karea_edit_tasks', 'Apply the SAME change to many tasks in ONE request - status, priority, category, deadline, assignee, or a note. Each task is given by visual ID, name or UUID. Returns a per-task result; an identifier that does not resolve is reported without costing the rest. Use karea_edit_task for a single task, or when each task needs a different value. Up to 5000 per call.', {
+  tasks: z.array(z.string()).min(1).max(5000).describe('Task identifiers (visual ID like KA123, name, or UUID). Up to 5000 - it is one request whatever the size.'),
+  projectId: z.string().optional().describe('Project name or ID (helps resolve visual IDs and names)'),
+  status: z.string().optional().describe('New status for all of them: open, in_progress, blocked, review, done, cancelled, backlog'),
+  priority: z.number().min(1).max(5).optional().describe('New priority for all of them'),
+  category: z.string().optional().describe('Move all of them to this category (by name). A task whose project has no such category is reported, not silently skipped.'),
+  sla: z.string().optional().describe('New deadline for all of them - "5d", "tomorrow", "monday", or an ISO date'),
+  note: z.string().optional().describe('Add this note to every one of them'),
+}, async (params) => {
+  const body: Record<string, unknown> = { tasks: params.tasks }
+  if (params.projectId) body.projectId = params.projectId
+  if (params.status !== undefined) body.status = params.status
+  if (params.priority !== undefined) body.priority = params.priority
+  if (params.category !== undefined) body.category = params.category
+  if (params.sla !== undefined) body.sla = params.sla
+  if (params.note !== undefined) body.note = params.note
+
+  if (Object.keys(body).length <= (params.projectId ? 2 : 1)) {
+    return errorResult('Nothing to change - pass at least one of status, priority, category, sla or note.')
+  }
+
+  let res: any
+  try {
+    res = await karea.bulkUpdateTasks(body)
+  } catch (err) {
+    return errorResult(err instanceof Error ? err.message : String(err))
+  }
+
+  const results: any[] = res?.results || []
+  const applied = res?.applied ?? results.filter((r) => r.ok).length
+  const lines = results.map((r) => (r.ok ? `ok       ${r.ref}` : `FAILED   ${r.ref} - ${r.reason || 'failed'}`))
+  const changed = Object.entries(body)
+    .filter(([k]) => k !== 'tasks' && k !== 'projectId')
+    .map(([k, v]) => `${k}=${v}`)
+    .join(', ')
+
+  return {
+    content: [{
+      type: 'text',
+      text: `Applied ${changed} to ${applied}/${params.tasks.length} task(s) in one request.\n\n${lines.join('\n')}`,
+    }],
+  }
+})
+
 // Close task
 registerTool('karea_close_task', 'Mark a task as done: sets status to done and stamps the close time. Reports any unmet closing requisites first unless confirm is set. To close several tasks at once use karea_done.', {
   task: z.string().describe('Task name, visual ID, or UUID'),
@@ -612,6 +669,7 @@ registerTool('karea_view_tasks', 'Return details for MANY tasks in one response.
   tasks: z.array(z.string()).min(1).max(50).describe('Array of task identifiers (visualId like C1/T2, name, or UUID). 1–50 items.'),
   projectId: z.string().optional().describe('Project name or ID (needed when visual IDs are used and share a single project).'),
   includeContext: z.boolean().optional().describe('If true, inline each task\'s AI Context in its block. Default false.'),
+  includeMarkdown: z.boolean().optional().describe('KA540: if true, inline each task\'s long-form markdown document in its block. Default false. Context could already be read in bulk; this closes the same gap for the doc.'),
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
 
@@ -648,6 +706,25 @@ registerTool('karea_view_tasks', 'Return details for MANY tasks in one response.
             } else {
               block += `\n\n(AI Context available - re-call with includeContext=true to inline.)`
             }
+          }
+          /**
+           * KA540: the markdown doc, in bulk.
+           *
+           * Context could already be read for a batch and the doc could not,
+           * so reviewing what a set of tasks actually documents meant one
+           * call per task. Same flag shape as includeContext, and the same
+           * rule: mention that it exists even when it is not inlined, so the
+           * caller knows there is something to ask for.
+           */
+          if (params.includeMarkdown) {
+            // getTask does not carry the document - it has its own endpoint,
+            // the same way Context does. Only fetched when asked for, so the
+            // default batch still costs one request per task.
+            try {
+              const doc: any = await karea.getMarkdown(id, pid)
+              const md = typeof doc === 'string' ? doc : doc?.markdown
+              if (md && String(md).trim()) block += `\n\nMarkdown document:\n${md}`
+            } catch { /* a missing doc is not an error */ }
           }
         } catch { /* keep the original block */ }
       }
@@ -1284,22 +1361,65 @@ registerTool('karea_unlink_session', 'Remove a previously-linked AI session from
 })
 
 // Add note to task
-registerTool('karea_add_note', 'Add a note to a task. Notes are human-readable updates/observations (the user reads them). For private AI working memory that persists across sessions, use karea_set_context instead.', {
-  task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
+registerTool('karea_add_note', 'Add a note to a task - or the same note to many tasks at once, via `tasks`. Notes are human-readable updates/observations (the user reads them). For private AI working memory that persists across sessions, use karea_set_context instead.', {
+  task: z.string().optional().describe('Task name, visual ID (C1, T2), or UUID. Use this OR `tasks`.'),
+  tasks: z.array(z.string()).min(1).max(50).optional().describe('KA540: several task identifiers, to put the SAME note on all of them (e.g. "shipped in build X"). Use this OR `task`. 1-50 items.'),
   content: z.string().describe('Note content. Markdown is supported (lists, **bold**, `code`, links) - use it when it improves readability; plain text is also fine.'),
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
 }, async (params) => {
+  // Exactly one of the two. Accepting neither would note nothing and silently
+  // report success; accepting both hides which one was meant.
+  const targets = params.tasks?.length ? params.tasks : params.task ? [params.task] : []
+  if (targets.length === 0) return errorResult('Pass `task` for one task, or `tasks` for several.')
+  if (params.tasks?.length && params.task) {
+    return errorResult('Pass either `task` or `tasks`, not both.')
+  }
+
   const pid = await resolveProject(params.projectId)
-  const result = await karea.sendCommand(`/vt ${q(params.task)}`, pid)
-  const taskId = result.taskId || params.task
-  const taskData = await karea.getTask(taskId)
-  const note = await karea.addNote(taskData.id, params.content)
-  const linkNote = await maybeLinkSession(taskData.id, params)
-  const parts = [`Note added to "${taskData.title}".${linkNote || ''}`]
-  if (note?.id) parts.push(`Note ID: ${note.id}`)
-  parts.push(...recordFooter('task', { id: taskData.id, displayId: result.displayId || taskData.displayId }))
-  return { content: [{ type: 'text', text: parts.join('\n') }] }
+
+  const addOne = async (ref: string) => {
+    const result: any = await karea.sendCommand(`/vt ${q(ref)}`, pid)
+    const taskId = result.taskId || ref
+    const taskData = await karea.getTask(taskId)
+    const note = await karea.addNote(taskData.id, params.content)
+    const linkNote = await maybeLinkSession(taskData.id, params)
+    return { taskData, note, linkNote, displayId: result.displayId || taskData.displayId }
+  }
+
+  // Single: unchanged response, so every existing caller sees what it always did.
+  if (targets.length === 1) {
+    const { taskData, note, linkNote, displayId } = await addOne(targets[0])
+    const parts = [`Note added to "${taskData.title}".${linkNote || ''}`]
+    if (note?.id) parts.push(`Note ID: ${note.id}`)
+    parts.push(...recordFooter('task', { id: taskData.id, displayId }))
+    return { content: [{ type: 'text', text: parts.join('\n') }] }
+  }
+
+  /**
+   * Many: ONE request, through the same bulk endpoint the batch editor uses.
+   *
+   * This was a loop too, and had the same flaw - N commands against a 60/min
+   * limiter to express one intention.
+   */
+  try {
+    const res: any = await karea.bulkUpdateTasks({
+      tasks: targets,
+      ...(params.projectId ? { projectId: pid || params.projectId } : {}),
+      note: params.content,
+    })
+    const results: any[] = res?.results || []
+    const applied = res?.applied ?? results.filter((r) => r.ok).length
+    const lines = results.map((r) => (r.ok ? `ok      ${r.ref}` : `FAILED  ${r.ref} - ${r.reason || 'failed'}`))
+    return {
+      content: [{
+        type: 'text',
+        text: `Note added to ${applied}/${targets.length} task(s) in one request.\n\n${lines.join('\n')}`,
+      }],
+    }
+  } catch (err) {
+    return errorResult(err instanceof Error ? err.message : String(err))
+  }
 })
 
 // Edit a note on a task
@@ -1805,8 +1925,10 @@ registerTool('karea_unlink_question_from_meeting', 'Remove the link between an o
 // KA323: the advertised tool surface.
 // ---------------------------------------------------------------------------
 
-// Eleven nouns. Every one of the 64 registered tools is a verb on one of them,
-// and the order inside each group is the order you would use them in.
+// Eleven nouns. Every registered action is a verb on one of them, and the
+// order inside each group is the order you would use them in. The client sees
+// these eleven plus karea_help - twelve tools - not the actions behind them,
+// so adding an action here does not widen the advertised surface.
 export const TOOL_GROUPS: { tool: string; summary: string; actions: string[] }[] = [
   {
     tool: 'karea_projects',
@@ -1816,7 +1938,7 @@ export const TOOL_GROUPS: { tool: string; summary: string; actions: string[] }[]
   {
     tool: 'karea_tasks',
     summary: 'Tasks: find them, read them, create them, change them, close them. The main entry point - start here.',
-    actions: ['karea_list_tasks', 'karea_view_task', 'karea_view_tasks', 'karea_create_task', 'karea_edit_task', 'karea_close_task', 'karea_delete_task', 'karea_quick_task', 'karea_doing', 'karea_done'],
+    actions: ['karea_list_tasks', 'karea_view_task', 'karea_view_tasks', 'karea_create_task', 'karea_edit_task', 'karea_edit_tasks', 'karea_close_task', 'karea_delete_task', 'karea_quick_task', 'karea_doing', 'karea_done'],
   },
   {
     tool: 'karea_subtasks',

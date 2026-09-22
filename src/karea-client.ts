@@ -119,6 +119,13 @@ export async function updateTask(taskId: string, data: Record<string, unknown>) 
   return request(`/api/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(data) })
 }
 
+/**
+ * KA540: one request that changes many tasks. See /api/tasks/bulk.
+ */
+export async function bulkUpdateTasks(body: Record<string, unknown>) {
+  return request('/api/tasks/bulk', { method: 'PATCH', body: JSON.stringify(body) })
+}
+
 export async function createTaskDirect(data: Record<string, unknown>) {
   return request('/api/tasks', { method: 'POST', body: JSON.stringify(data) })
 }

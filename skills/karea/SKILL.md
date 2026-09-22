@@ -31,7 +31,7 @@ you are talking to Karea:
 
 <!-- SYNC:TOOL_CATALOGUE -->
 The server advertises **12 tools** (one per noun, plus `karea_help`), covering
-**68 actions**. Every tool takes `{ action, params }`:
+**69 actions**. Every tool takes `{ action, params }`:
 
 ```json
 { "action": "karea_create_task", "params": { "name": "Fix the navbar", "priority": 1 } }
@@ -40,7 +40,7 @@ The server advertises **12 tools** (one per noun, plus `karea_help`), covering
 - `karea_projects` - Projects and their categories: list, create, delete, share, and manage the categories inside a project.
   - `karea_list_projects`, `karea_create_project`, `karea_delete_project`, `karea_share_project`, `karea_create_category`, `karea_delete_category`
 - `karea_tasks` - Tasks: find them, read them, create them, change them, close them. The main entry point - start here.
-  - `karea_list_tasks`, `karea_view_task`, `karea_view_tasks`, `karea_create_task`, `karea_edit_task`, `karea_close_task`, `karea_delete_task`, `karea_quick_task`, `karea_doing`, `karea_done`
+  - `karea_list_tasks`, `karea_view_task`, `karea_view_tasks`, `karea_create_task`, `karea_edit_task`, `karea_edit_tasks`, `karea_close_task`, `karea_delete_task`, `karea_quick_task`, `karea_doing`, `karea_done`
 - `karea_subtasks` - Subtasks and closing requisites - the checklist a task has to satisfy before it can be closed.
   - `karea_create_subtask`, `karea_list_subtasks`, `karea_add_requisite`, `karea_toggle_requisite`, `karea_delete_requisite`
 - `karea_notes` - Notes on a task - human-readable updates the user reads - plus the sticky-note scratch board. For private cross-session memory use karea_docs (set_context).
@@ -62,7 +62,7 @@ The server advertises **12 tools** (one per noun, plus `karea_help`), covering
 - `karea_help` - full parameter schema for any action.
 
 Call `karea_help` with an action name for its full parameter schema. Set
-`KAREA_MCP_LEGACY_TOOLS=1` to go back to 68 individual tools.
+`KAREA_MCP_LEGACY_TOOLS=1` to go back to 69 individual tools.
 <!-- /SYNC:TOOL_CATALOGUE -->
 
 ### Tasks

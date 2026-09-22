@@ -37,7 +37,8 @@ const src = ['src/tools.ts', 'src/index.ts']
   .join('\n')
 
 // KA323: two different numbers now, and the distinction matters.
-//   actions - the 64 operations, each registered with registerTool()
+//   actions - the operations, each registered with registerTool(). Counted
+//             from source, so adding one keeps the description honest.
 //   tools   - what the client actually SEES: one tool per noun, plus
 //             karea_help. This is the number Glama scores, and the one every
 //             description below must quote.
