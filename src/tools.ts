@@ -15,6 +15,26 @@
 import { z } from 'zod'
 import * as karea from './karea-client'
 
+/**
+ * KA561: dates as the user reads them, not as the server stores them.
+ *
+ * Everything here used to go through `toLocaleString()` with no zone, which
+ * resolves to the process's - UTC in the container. A 15:30 deadline was
+ * handed to the agent as 13:30 and repeated to the user as fact. A silent two
+ * hour error is worse than no time at all: nothing about it looks wrong.
+ */
+async function whenLocal(value: string | Date | null | undefined, opts?: { dateOnly?: boolean }) {
+  if (!value) return '?'
+  const tz = await karea.getUserTimezone()
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return '?'
+  return d.toLocaleString('en-GB', {
+    timeZone: tz,
+    day: '2-digit', month: 'short', year: 'numeric',
+    ...(opts?.dateOnly ? {} : { hour: '2-digit', minute: '2-digit' }),
+  })
+}
+
 function q(value: string): string {
   if (value.includes('"')) value = value.replace(/"/g, "'")
   if (/\s|^-/.test(value)) return `"${value}"`
@@ -78,7 +98,7 @@ export async function pendingReminderNudge(): Promise<string> {
       for (const r of items.slice(0, 5)) {
         const t = r.task
         const display = t?.project?.prefix && typeof t?.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t?.id || '').slice(0, 6)}`
-        const when = new Date(r.fireAt).toLocaleString()
+        const when = await whenLocal(r.fireAt)
         const title = r.title || t?.title || 'Reminder'
         lines.push(`  · [${r.id}] ${display} - ${title} (fires ${when})${r.repeat ? ` [repeat: ${r.repeat}]` : ''}`)
       }
@@ -207,6 +227,10 @@ registerTool('karea_list_tasks', 'List tasks in a project. Defaults to open task
 
   if (tasks.length === 0) return { content: [{ type: 'text', text: 'No tasks found.' }] }
 
+  // Resolved once: the callback below cannot await, and one settings lookup
+  // for a list of tasks is cheaper than one per row anyway.
+  const tzNow = await karea.getUserTimezone()
+  const dayOf = (v: string | Date) => new Date(v).toLocaleDateString('en-GB', { timeZone: tzNow })
   const lines = tasks.map((t: any) => {
     const did = t.displayId || (t.project?.prefix && t.seq != null ? `${t.project.prefix}${t.seq}` : null)
     const parts = [did || `P${t.priority}`, `[${t.status}]`, t.title]
@@ -216,8 +240,8 @@ registerTool('karea_list_tasks', 'List tasks in a project. Defaults to open task
       parts.push(`(subtask of ${parentRef})`)
     }
     if (t.category) parts.push(`(${t.category})`)
-    if (t.deadline) parts.push(`due: ${new Date(t.deadline).toLocaleDateString('en-GB')}`)
-    if (t.closedAt) parts.push(`closed: ${new Date(t.closedAt).toLocaleDateString('en-GB')}`)
+    if (t.deadline) parts.push(`due: ${dayOf(t.deadline)}`)
+    if (t.closedAt) parts.push(`closed: ${dayOf(t.closedAt)}`)
     return parts.join(' ')
   })
 
@@ -611,8 +635,11 @@ registerTool('karea_view_task', 'Return one task with all its details (status, p
         const md = await karea.getTaskMeetings(taskId)
         const meetings = md.meetings || []
         if (meetings.length > 0) {
+          const mtz = await karea.getUserTimezone()
           const lines = meetings.map((m: any) => {
-            const when = m.startAt ? new Date(m.startAt).toISOString().replace('T', ' ').slice(0, 16) : '?'
+            const when = m.startAt
+              ? new Date(m.startAt).toLocaleString('en-GB', { timeZone: mtz, day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+              : '?'
             return `  - ${when} ${m.title}${m.location ? ` @ ${m.location}` : ''} (id: ${m.id})`
           })
           response += `\n\nLinked Meetings (${meetings.length}):\n${lines.join('\n')}`
@@ -1095,7 +1122,7 @@ registerTool('karea_get_resource', 'Return a resource with its full content and 
   meta.push(`Size: ${resource.sizeBytes} bytes`)
   if (resource.folder) meta.push(`Folder: ${resource.folder}`)
   if (resource.project?.name) meta.push(`Project: ${resource.project.name}`)
-  if (resource.createdAt) meta.push(`Created: ${new Date(resource.createdAt).toLocaleString('en-GB')}`)
+  if (resource.createdAt) meta.push(`Created: ${await whenLocal(resource.createdAt)}`)
   if (resource.taskLinks?.length) {
     meta.push(`Linked tasks: ${resource.taskLinks.map((l: any) => {
       const t = l.task
@@ -1658,10 +1685,12 @@ registerTool('karea_unlink_jira', 'Remove the JIRA link from a Karea task', {
 // surfaced on the very next tool call.
 // ─────────────────────────────────────────────────────────────────────────
 
-function formatReminderLine(r: any): string {
+function formatReminderLine(r: any, tz = 'UTC'): string {
   const t = r.task || {}
   const display = t.project?.prefix && typeof t.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t.id || '').slice(0, 6)}`
-  const when = new Date(r.fireAt).toLocaleString()
+  const when = r.fireAt
+    ? new Date(r.fireAt).toLocaleString('en-GB', { timeZone: tz, day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '?'
   const title = r.title || t.title || 'Reminder'
   const bits = [`[${r.id}] ${display} - ${title} · fires ${when} · status ${r.status}`]
   if (r.repeat) bits.push(`repeat ${r.repeat}`)
@@ -1680,7 +1709,8 @@ registerTool('karea_check_reminders', 'Return the caller\'s upcoming and past-du
   }
   const items = await karea.listReminders({ taskId: tid, includeDone: !!includeDone })
   if (items.length === 0) return { content: [{ type: 'text', text: 'No reminders.' }] }
-  const lines = ['Reminders:', ...items.map((r: any) => `  · ${formatReminderLine(r)}`)]
+  const rtz = await karea.getUserTimezone()
+  const lines = ['Reminders:', ...items.map((r: any) => `  · ${formatReminderLine(r, rtz)}`)]
   return { content: [{ type: 'text', text: lines.join('\n') }] }
 })
 
@@ -1718,7 +1748,7 @@ registerTool('karea_create_reminder', 'Schedule a reminder on a task. The remind
     fireAt: fireIso,
     emailOptIn: params.emailOptIn,
   })
-  return { content: [{ type: 'text', text: `Reminder set on "${t.title}".\n  ${formatReminderLine({ ...rem, task: t })}` }] }
+  return { content: [{ type: 'text', text: `Reminder set on "${t.title}".\n  ${formatReminderLine({ ...rem, task: t }, await karea.getUserTimezone())}` }] }
 })
 
 registerTool('karea_snooze_reminder', 'Snooze a firing reminder by N minutes. The modal closes; the reminder re-fires after the snooze window.', {
@@ -1726,7 +1756,7 @@ registerTool('karea_snooze_reminder', 'Snooze a firing reminder by N minutes. Th
   minutes: z.number().int().min(1).max(60 * 24 * 7).describe('How many minutes to snooze.'),
 }, async ({ reminderId, minutes }) => {
   const rem = await karea.patchReminder(reminderId, { action: 'snooze', snoozeMinutes: minutes })
-  return { content: [{ type: 'text', text: `Snoozed reminder ${reminderId} for ${minutes} min → next fire ${new Date(rem.fireAt).toLocaleString()}.` }] }
+  return { content: [{ type: 'text', text: `Snoozed reminder ${reminderId} for ${minutes} min → next fire ${await whenLocal(rem.fireAt)}.` }] }
 })
 
 registerTool('karea_dismiss_reminder', 'Dismiss a reminder - cancels it so it will not fire again.', {
@@ -1785,7 +1815,7 @@ registerTool('karea_view_meeting', 'Return one meeting in full: time, location, 
   const data = await karea.getMeeting(meetingId)
   const m = data.meeting || data
   const parts = [meetingLine(m)]
-  if (m.endAt) parts.push(`Ends: ${new Date(m.endAt).toISOString().replace('T', ' ').slice(0, 16)}`)
+  if (m.endAt) parts.push(`Ends: ${await whenLocal(m.endAt)}`)
   if (m.description) parts.push(`\nDescription:\n${m.description}`)
   const attendees = Array.isArray(m.attendees) ? m.attendees : []
   if (attendees.length) {

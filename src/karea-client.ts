@@ -462,3 +462,35 @@ export async function editStickyNote(id: string, body: Record<string, unknown>) 
 export async function deleteStickyNote(id: string) {
   return request(`/api/sticky-notes/${id}`, { method: 'DELETE' })
 }
+
+/**
+ * KA561: the user's timezone, so times are reported as they read them.
+ *
+ * Every datetime the MCP surface printed went through `toLocaleString()` with
+ * no zone, which resolves to the SERVER's - UTC in the container. A task due
+ * at 15:30 Madrid was reported to the agent as 13:30, and the agent then told
+ * the user 13:30 with complete confidence. A two hour error is worse than no
+ * time at all, because nothing about it looks wrong.
+ *
+ * Cached per API key for the life of the process: it is one small request, it
+ * almost never changes, and the alternative is paying for it on every tool
+ * call that happens to print a date.
+ */
+const tzCache = new Map<string, string>()
+
+export async function getUserTimezone(): Promise<string> {
+  const ctx = callContext.getStore()
+  const key = `${ctx?.baseUrl || KAREA_URL}|${ctx?.apiKey || KAREA_API_KEY}`
+  const cached = tzCache.get(key)
+  if (cached) return cached
+  try {
+    const settings = await request('/api/settings') as { timezone?: unknown } | null
+    const raw = settings?.timezone
+    const tz = typeof raw === 'string' && raw ? raw : 'UTC'
+    tzCache.set(key, tz)
+    return tz
+  } catch {
+    // A missing timezone must not break the tool that wanted to print a date.
+    return 'UTC'
+  }
+}
