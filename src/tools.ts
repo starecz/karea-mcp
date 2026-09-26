@@ -233,7 +233,12 @@ registerTool('karea_list_tasks', 'List tasks in a project. Defaults to open task
   const dayOf = (v: string | Date) => new Date(v).toLocaleDateString('en-GB', { timeZone: tzNow })
   const lines = tasks.map((t: any) => {
     const did = t.displayId || (t.project?.prefix && t.seq != null ? `${t.project.prefix}${t.seq}` : null)
-    const parts = [did || `P${t.priority}`, `[${t.status}]`, t.title]
+    // KA602: "[review]" on its own hides which review. The stage rides
+    // inside the same bracket so the line length barely moves.
+    const st = t.reviewStage && String(t.status) === 'review'
+      ? `${t.status}: ${String(t.reviewStage).replace(/_/g, ' ')}`
+      : t.status
+    const parts = [did || `P${t.priority}`, `[${st}]`, t.title]
     if (did) parts.splice(1, 0, `P${t.priority}`)
     if (t.parentId) {
       const parentRef = t.parentVisualId || t.parentTitle || t.parentId
@@ -310,6 +315,7 @@ registerTool('karea_edit_task', 'Update fields of an existing task (title, statu
   name: z.string().optional().describe('New task title (rename the task)'),
   priority: z.number().min(1).max(5).optional().describe('New priority'),
   status: z.string().optional().describe('New status: open, in_progress, blocked, review, done'),
+  reviewStage: z.string().optional().describe('KA602: who is reviewing it, for a task in Review - a stage name or slug from the project (defaults are Developer review, Peer review, Client review). Passing one also moves the task into Review if it is not there already. Rejected when the project has review stages turned off.'),
   sla: z.string().optional().describe('New deadline'),
   description: z.string().optional().describe('New description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short (a few sentences); use `markdown` for long-form docs.'),
   markdown: z.string().optional().describe('Long-form markdown content - use for investigation findings, technical/functional docs, solution design, root cause analysis. Overwrites existing markdown; read first with karea_get_markdown to append.'),
@@ -329,6 +335,7 @@ registerTool('karea_edit_task', 'Update fields of an existing task (title, statu
   let cmd = `/et ${q(params.task)}`
   if (params.priority) cmd += ` -prio ${params.priority}`
   if (params.status) cmd += ` -status ${params.status}`
+  if (params.reviewStage) cmd += ` -reviewstage ${q(params.reviewStage)}`
   if (params.sla) cmd += ` -sla ${q(params.sla)}`
   if (params.description) cmd += ` -d ${q(params.description)}`
   if (params.category) cmd += ` -cat ${q(params.category)}`

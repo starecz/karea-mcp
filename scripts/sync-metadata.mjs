@@ -9,6 +9,10 @@
  *   - mcp/README.md            (tool count + tool catalogue between markers)
  *   - src/app/dashboard/help/mcp-tools.generated.ts  (the in-app help page)
  *   - public/karea-skill/SKILL.md  (catalogue between markers)
+ *
+ * glama.json is NOT generated - it is hand-written and lives at the root of
+ * both this directory and the karea-mcp repo. It only names the maintainers,
+ * which is how Glama proves ownership; nothing derives from the tool list.
  *   - claude-skill/SKILL.md        (catalogue between markers)
  *
  * KA492: the help page used to hand-maintain its own list of tools. It drifted
