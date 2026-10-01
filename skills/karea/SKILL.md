@@ -5,7 +5,7 @@ description: Use this skill for ALL Karea task-manager work, and load it BEFORE 
 
 # Karea
 
-Karea is a keyboard-first task manager at [karea.app](https://karea.app). This skill lets the user drive Karea from inside Claude Code through the `karea` MCP server.
+Karea is an MCP-first task manager at [karea.app](https://karea.app). This skill lets the user drive Karea from inside Claude Code through the `karea` MCP server.
 
 ## When to use this skill
 
