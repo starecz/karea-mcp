@@ -30,35 +30,29 @@ you are talking to Karea:
   is installed, so this is the only option on mobile.
 
 <!-- SYNC:TOOL_CATALOGUE -->
-The server advertises **12 tools** (one per noun, plus `karea_help`), covering
+The server advertises **9 tools** (one read-only tool, write tools by area, one delete tool, plus `karea_help`), covering
 **69 actions**. Every tool takes `{ action, params }`:
 
 ```json
 { "action": "karea_create_task", "params": { "name": "Fix the navbar", "priority": 1 } }
 ```
 
-- `karea_projects` - Projects and their categories: list, create, delete, share, and manage the categories inside a project.
-  - `karea_list_projects`, `karea_create_project`, `karea_delete_project`, `karea_share_project`, `karea_create_category`, `karea_delete_category`
-- `karea_tasks` - Tasks: find them, read them, create them, change them, close them. The main entry point - start here.
-  - `karea_list_tasks`, `karea_view_task`, `karea_view_tasks`, `karea_create_task`, `karea_edit_task`, `karea_edit_tasks`, `karea_close_task`, `karea_delete_task`, `karea_quick_task`, `karea_doing`, `karea_done`
-- `karea_subtasks` - Subtasks and closing requisites - the checklist a task has to satisfy before it can be closed.
-  - `karea_create_subtask`, `karea_list_subtasks`, `karea_add_requisite`, `karea_toggle_requisite`, `karea_delete_requisite`
-- `karea_notes` - Notes on a task - human-readable updates the user reads - plus the sticky-note scratch board. For private cross-session memory use karea_docs (set_context).
-  - `karea_list_notes`, `karea_add_note`, `karea_edit_note`, `karea_delete_note`, `karea_list_sticky_notes`, `karea_create_sticky_note`, `karea_edit_sticky_note`, `karea_delete_sticky_note`
-- `karea_docs` - A task's long-form markdown document and its AI Context (private working memory that survives across sessions).
-  - `karea_get_markdown`, `karea_set_markdown`, `karea_get_context`, `karea_set_context`
-- `karea_questions` - Open questions: things you are waiting on an answer for. Create, answer, edit, delete.
-  - `karea_list_questions`, `karea_create_question`, `karea_answer_question`, `karea_edit_question`, `karea_delete_question`
-- `karea_resources` - The file/document library: list, read, create, update, upload, delete, and attach resources to tasks.
-  - `karea_list_resources`, `karea_get_resource`, `karea_create_resource`, `karea_update_resource`, `karea_upload_resource`, `karea_delete_resource`, `karea_link_resource_to_task`, `karea_unlink_resource_from_task`
-- `karea_meetings` - Meetings, and the tasks and open questions attached to them.
-  - `karea_list_meetings`, `karea_view_meeting`, `karea_create_meeting`, `karea_edit_meeting`, `karea_delete_meeting`, `karea_link_task_to_meeting`, `karea_unlink_task_from_meeting`, `karea_link_question_to_meeting`, `karea_unlink_question_from_meeting`
-- `karea_reminders` - Reminders: see what is due, create one, snooze it, dismiss it, mark it done.
-  - `karea_check_reminders`, `karea_create_reminder`, `karea_snooze_reminder`, `karea_dismiss_reminder`, `karea_mark_reminder_done`
-- `karea_integrations` - JIRA links on a task, and AI CLI sessions linked to a task.
-  - `karea_get_jira_link`, `karea_link_jira`, `karea_unlink_jira`, `karea_link_session`, `karea_list_sessions`, `karea_unlink_session`
-- `karea_assistant` - Ask Karea a natural-language question about your work, or generate a recap of a period.
-  - `karea_ask`, `karea_recap`
+- `karea_read` - Read anything in Karea without changing it: projects, tasks, subtasks, notes, sticky notes, task documents and AI context, open questions, resources, meetings, reminders, Jira links, AI sessions, and the activity recap. The main entry point - start here.
+  - `karea_list_projects`, `karea_list_tasks`, `karea_view_task`, `karea_view_tasks`, `karea_list_subtasks`, `karea_list_notes`, `karea_list_sticky_notes`, `karea_get_markdown`, `karea_get_context`, `karea_list_questions`, `karea_list_resources`, `karea_get_resource`, `karea_list_meetings`, `karea_view_meeting`, `karea_check_reminders`, `karea_get_jira_link`, `karea_list_sessions`, `karea_recap`
+- `karea_tasks_write` - Create and change tasks: create, edit one or many, close one or many, log finished or in-progress work, plus subtasks and closing requisites (the checklist a task needs before it can close).
+  - `karea_create_task`, `karea_quick_task`, `karea_doing`, `karea_edit_task`, `karea_edit_tasks`, `karea_close_task`, `karea_done`, `karea_create_subtask`, `karea_add_requisite`, `karea_toggle_requisite`
+- `karea_notes_write` - Write notes: add or edit task notes (human-readable updates) and sticky notes, and write a task's markdown document or an entry of its AI Context (private cross-session memory). Overwrites what an edit replaces.
+  - `karea_add_note`, `karea_edit_note`, `karea_create_sticky_note`, `karea_edit_sticky_note`, `karea_set_markdown`, `karea_set_context`
+- `karea_projects_write` - Create a project or a category inside one, or share a project with someone by email.
+  - `karea_create_project`, `karea_create_category`, `karea_share_project`
+- `karea_meetings_write` - Create and edit meetings and put tasks or questions on their agenda; create, answer and edit open questions; create, snooze, dismiss or complete reminders.
+  - `karea_create_meeting`, `karea_edit_meeting`, `karea_link_task_to_meeting`, `karea_link_question_to_meeting`, `karea_create_question`, `karea_answer_question`, `karea_edit_question`, `karea_create_reminder`, `karea_snooze_reminder`, `karea_dismiss_reminder`, `karea_mark_reminder_done`
+- `karea_resources_write` - Create, upload and update resources in the file/document library and attach them to tasks; link a task to a Jira issue or to an AI coding session.
+  - `karea_create_resource`, `karea_upload_resource`, `karea_update_resource`, `karea_link_resource_to_task`, `karea_link_jira`, `karea_link_session`
+- `karea_assistant` - Send a natural-language request to the Karea AI assistant, which may read or change your tasks to carry it out.
+  - `karea_ask`
+- `karea_delete` - Delete or detach things. Permanent deletes (project, category, task, requisite, note, sticky note, question, resource, meeting) need confirm=true where stated; detaching a resource, task, question, Jira issue or AI session from what it is linked to.
+  - `karea_delete_project`, `karea_delete_category`, `karea_delete_task`, `karea_delete_requisite`, `karea_delete_note`, `karea_delete_sticky_note`, `karea_delete_question`, `karea_delete_resource`, `karea_delete_meeting`, `karea_unlink_resource_from_task`, `karea_unlink_task_from_meeting`, `karea_unlink_question_from_meeting`, `karea_unlink_jira`, `karea_unlink_session`
 - `karea_help` - full parameter schema for any action.
 
 Call `karea_help` with an action name for its full parameter schema. Set
@@ -67,7 +61,7 @@ Call `karea_help` with an action name for its full parameter schema. Set
 
 ### Tasks
 
-Called through `karea_tasks` or `karea_subtasks` or `karea_docs`.
+Reads go through `karea_read`; changes through `karea_tasks_write` (documents and AI Context through `karea_notes_write`); deletes through `karea_delete`.
 
 
 | Action | Use for |
@@ -93,7 +87,7 @@ Called through `karea_tasks` or `karea_subtasks` or `karea_docs`.
 
 ### Notes
 
-Called through `karea_notes`.
+Reads go through `karea_read`; changes through `karea_notes_write`; deletes through `karea_delete`.
 
 
 | Action | Use for |
@@ -105,7 +99,7 @@ Called through `karea_notes`.
 
 ### Questions
 
-Called through `karea_questions`.
+Reads go through `karea_read`; changes through `karea_meetings_write`; deletes through `karea_delete`.
 
 
 | Action | Use for |
@@ -118,7 +112,7 @@ Called through `karea_questions`.
 
 ### Resources
 
-Called through `karea_resources`.
+Reads go through `karea_read`; changes through `karea_resources_write`; deletes and unlinks through `karea_delete`.
 
 
 | Action | Use for |
@@ -133,7 +127,7 @@ Called through `karea_resources`.
 
 ### Reminders (KA422)
 
-Called through `karea_reminders`.
+Reads go through `karea_read`; changes through `karea_meetings_write`.
 
 
 Task-scoped reminders. When a reminder fires, Karea shows a full-screen in-app modal to the user and (optionally) emails them. The MCP surfaces reminders in two ways:
@@ -153,7 +147,7 @@ When you see the `⏰ Pending reminders:` footer, decide with the user before di
 
 ### Meetings
 
-Called through `karea_meetings`.
+Reads go through `karea_read`; changes through `karea_meetings_write`; deletes and unlinks through `karea_delete`.
 
 A meeting is a calendar event the user prepares for: it carries prep notes, an
 agenda of linked tasks, open questions to raise, and afterwards a transcript.
@@ -181,7 +175,7 @@ Two things worth knowing when you read a meeting back:
 
 ### Sticky notes
 
-Called through `karea_notes`, alongside the task notes.
+Reads go through `karea_read`; changes through `karea_notes_write`, alongside the task notes; deletes through `karea_delete`.
 
 The scratch layer: no status, no assignee, no deadline, nothing to close. A
 command the user keeps re-typing, a URL they need for the next twenty minutes,
@@ -201,7 +195,7 @@ and `@resource` mentions plus bare task IDs like `KA123` become links.
 
 ### AI Sessions
 
-Called through `karea_integrations`.
+Reads go through `karea_read`; links through `karea_resources_write`; unlinks through `karea_delete`.
 
 
 Link your current AI coding session (Claude Code, OpenCode, Codex, Cursor, Aider) to a task so the user can see the history and copy a resume command later.
@@ -214,7 +208,7 @@ Link your current AI coding session (Claude Code, OpenCode, Codex, Cursor, Aider
 
 ### JIRA
 
-Called through `karea_integrations`.
+Reads go through `karea_read`; links through `karea_resources_write`; unlinks through `karea_delete`.
 
 
 | Action | Use for |
@@ -225,7 +219,7 @@ Called through `karea_integrations`.
 
 ### Projects & Categories
 
-Called through `karea_projects`.
+Reads go through `karea_read`; changes through `karea_projects_write`; deletes through `karea_delete`.
 
 
 | Action | Use for |
@@ -238,7 +232,7 @@ Called through `karea_projects`.
 
 ### Other
 
-Called through `karea_assistant`.
+`karea_recap` goes through `karea_read`; `karea_ask` through `karea_assistant`.
 
 
 | Action | Use for |

@@ -9,7 +9,7 @@
  *
  * Nothing here knows about MCP servers, JSON-RPC or stdio. It is a registry of
  * named actions with zod schemas and handlers, plus the grouping table that
- * turns 68 of them into 12 tools.
+ * groups them into a few tools: one read-only, write tools by area, one for deletes.
  */
 
 import { z } from 'zod'
@@ -1966,68 +1966,51 @@ registerTool('karea_unlink_question_from_meeting', 'Remove the link between an o
 // KA323: the advertised tool surface.
 // ---------------------------------------------------------------------------
 
-// Eleven nouns. Every registered action is a verb on one of them, and the
-// order inside each group is the order you would use them in. The client sees
-// these eleven plus karea_help - twelve tools - not the actions behind them,
-// so adding an action here does not widen the advertised surface.
+// Directory rule (Claude connector review): a tool may not mix reads with
+// writes, even if its description says which actions are which. So the tools
+// are split by what they DO, not by noun: one read-only tool, write tools by
+// area, and one tool for deletes - each with its own annotations. Nine tools
+// plus room to grow under the ~12 the model handles well.
 export const TOOL_GROUPS: { tool: string; summary: string; actions: string[] }[] = [
   {
-    tool: 'karea_projects',
-    summary: 'Projects and their categories: list, create, delete, share, and manage the categories inside a project.',
-    actions: ['karea_list_projects', 'karea_create_project', 'karea_delete_project', 'karea_share_project', 'karea_create_category', 'karea_delete_category'],
+    tool: 'karea_read',
+    summary: 'Read anything in Karea without changing it: projects, tasks, subtasks, notes, sticky notes, task documents and AI context, open questions, resources, meetings, reminders, Jira links, AI sessions, and the activity recap. The main entry point - start here.',
+    actions: ['karea_list_projects', 'karea_list_tasks', 'karea_view_task', 'karea_view_tasks', 'karea_list_subtasks', 'karea_list_notes', 'karea_list_sticky_notes', 'karea_get_markdown', 'karea_get_context', 'karea_list_questions', 'karea_list_resources', 'karea_get_resource', 'karea_list_meetings', 'karea_view_meeting', 'karea_check_reminders', 'karea_get_jira_link', 'karea_list_sessions', 'karea_recap'],
   },
   {
-    tool: 'karea_tasks',
-    summary: 'Tasks: find them, read them, create them, change them, close them. The main entry point - start here.',
-    actions: ['karea_list_tasks', 'karea_view_task', 'karea_view_tasks', 'karea_create_task', 'karea_edit_task', 'karea_edit_tasks', 'karea_close_task', 'karea_delete_task', 'karea_quick_task', 'karea_doing', 'karea_done'],
+    tool: 'karea_tasks_write',
+    summary: 'Create and change tasks: create, edit one or many, close one or many, log finished or in-progress work, plus subtasks and closing requisites (the checklist a task needs before it can close).',
+    actions: ['karea_create_task', 'karea_quick_task', 'karea_doing', 'karea_edit_task', 'karea_edit_tasks', 'karea_close_task', 'karea_done', 'karea_create_subtask', 'karea_add_requisite', 'karea_toggle_requisite'],
   },
   {
-    tool: 'karea_subtasks',
-    summary: 'Subtasks and closing requisites - the checklist a task has to satisfy before it can be closed.',
-    actions: ['karea_create_subtask', 'karea_list_subtasks', 'karea_add_requisite', 'karea_toggle_requisite', 'karea_delete_requisite'],
+    tool: 'karea_notes_write',
+    summary: "Write notes: add or edit task notes (human-readable updates) and sticky notes, and write a task's markdown document or an entry of its AI Context (private cross-session memory). Overwrites what an edit replaces.",
+    actions: ['karea_add_note', 'karea_edit_note', 'karea_create_sticky_note', 'karea_edit_sticky_note', 'karea_set_markdown', 'karea_set_context'],
   },
   {
-    tool: 'karea_notes',
-    summary: 'Notes on a task - human-readable updates the user reads - plus the sticky-note scratch board. For private cross-session memory use karea_docs (set_context).',
-    actions: [
-      'karea_list_notes', 'karea_add_note', 'karea_edit_note', 'karea_delete_note',
-      'karea_list_sticky_notes', 'karea_create_sticky_note', 'karea_edit_sticky_note', 'karea_delete_sticky_note',
-    ],
+    tool: 'karea_projects_write',
+    summary: 'Create a project or a category inside one, or share a project with someone by email.',
+    actions: ['karea_create_project', 'karea_create_category', 'karea_share_project'],
   },
   {
-    tool: 'karea_docs',
-    summary: "A task's long-form markdown document and its AI Context (private working memory that survives across sessions).",
-    actions: ['karea_get_markdown', 'karea_set_markdown', 'karea_get_context', 'karea_set_context'],
+    tool: 'karea_meetings_write',
+    summary: 'Create and edit meetings and put tasks or questions on their agenda; create, answer and edit open questions; create, snooze, dismiss or complete reminders.',
+    actions: ['karea_create_meeting', 'karea_edit_meeting', 'karea_link_task_to_meeting', 'karea_link_question_to_meeting', 'karea_create_question', 'karea_answer_question', 'karea_edit_question', 'karea_create_reminder', 'karea_snooze_reminder', 'karea_dismiss_reminder', 'karea_mark_reminder_done'],
   },
   {
-    tool: 'karea_questions',
-    summary: 'Open questions: things you are waiting on an answer for. Create, answer, edit, delete.',
-    actions: ['karea_list_questions', 'karea_create_question', 'karea_answer_question', 'karea_edit_question', 'karea_delete_question'],
-  },
-  {
-    tool: 'karea_resources',
-    summary: 'The file/document library: list, read, create, update, upload, delete, and attach resources to tasks.',
-    actions: ['karea_list_resources', 'karea_get_resource', 'karea_create_resource', 'karea_update_resource', 'karea_upload_resource', 'karea_delete_resource', 'karea_link_resource_to_task', 'karea_unlink_resource_from_task'],
-  },
-  {
-    tool: 'karea_meetings',
-    summary: 'Meetings, and the tasks and open questions attached to them.',
-    actions: ['karea_list_meetings', 'karea_view_meeting', 'karea_create_meeting', 'karea_edit_meeting', 'karea_delete_meeting', 'karea_link_task_to_meeting', 'karea_unlink_task_from_meeting', 'karea_link_question_to_meeting', 'karea_unlink_question_from_meeting'],
-  },
-  {
-    tool: 'karea_reminders',
-    summary: 'Reminders: see what is due, create one, snooze it, dismiss it, mark it done.',
-    actions: ['karea_check_reminders', 'karea_create_reminder', 'karea_snooze_reminder', 'karea_dismiss_reminder', 'karea_mark_reminder_done'],
-  },
-  {
-    tool: 'karea_integrations',
-    summary: 'JIRA links on a task, and AI CLI sessions linked to a task.',
-    actions: ['karea_get_jira_link', 'karea_link_jira', 'karea_unlink_jira', 'karea_link_session', 'karea_list_sessions', 'karea_unlink_session'],
+    tool: 'karea_resources_write',
+    summary: 'Create, upload and update resources in the file/document library and attach them to tasks; link a task to a Jira issue or to an AI coding session.',
+    actions: ['karea_create_resource', 'karea_upload_resource', 'karea_update_resource', 'karea_link_resource_to_task', 'karea_link_jira', 'karea_link_session'],
   },
   {
     tool: 'karea_assistant',
-    summary: 'Ask Karea a natural-language question about your work, or generate a recap of a period.',
-    actions: ['karea_ask', 'karea_recap'],
+    summary: 'Send a natural-language request to the Karea AI assistant, which may read or change your tasks to carry it out.',
+    actions: ['karea_ask'],
+  },
+  {
+    tool: 'karea_delete',
+    summary: 'Delete or detach things. Permanent deletes (project, category, task, requisite, note, sticky note, question, resource, meeting) need confirm=true where stated; detaching a resource, task, question, Jira issue or AI session from what it is linked to.',
+    actions: ['karea_delete_project', 'karea_delete_category', 'karea_delete_task', 'karea_delete_requisite', 'karea_delete_note', 'karea_delete_sticky_note', 'karea_delete_question', 'karea_delete_resource', 'karea_delete_meeting', 'karea_unlink_resource_from_task', 'karea_unlink_task_from_meeting', 'karea_unlink_question_from_meeting', 'karea_unlink_jira', 'karea_unlink_session'],
   },
 ]
 
@@ -2117,17 +2100,14 @@ export function actionAnnotations(name: string): ToolHints {
 }
 
 const GROUP_TITLES: Record<string, string> = {
-  karea_projects: 'Karea projects and categories',
-  karea_tasks: 'Karea tasks',
-  karea_subtasks: 'Karea subtasks and closing requisites',
-  karea_notes: 'Karea notes and sticky notes',
-  karea_docs: 'Karea task documents and AI context',
-  karea_questions: 'Karea open questions',
-  karea_resources: 'Karea resources',
-  karea_meetings: 'Karea meetings',
-  karea_reminders: 'Karea reminders',
-  karea_integrations: 'Karea integrations (Jira, AI sessions)',
-  karea_assistant: 'Karea AI assistant and recap',
+  karea_read: 'Read from Karea',
+  karea_tasks_write: 'Create and update tasks',
+  karea_notes_write: 'Write notes and task documents',
+  karea_projects_write: 'Create and share projects',
+  karea_meetings_write: 'Manage meetings, questions and reminders',
+  karea_resources_write: 'Manage resources and integrations',
+  karea_assistant: 'Ask the Karea AI assistant',
+  karea_delete: 'Delete or unlink in Karea',
 }
 
 /**

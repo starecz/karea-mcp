@@ -242,7 +242,7 @@ writeFileSync(join(appRoot, 'src/app/dashboard/help/mcp-tools.generated.ts'), ge
 
 // The skill docs carry the same catalogue, in markdown, between markers.
 const skillCatalogue = `<!-- SYNC:TOOL_CATALOGUE -->
-The server advertises **${toolCount} tools** (one per noun, plus \`karea_help\`), covering
+The server advertises **${toolCount} tools** (one read-only tool, write tools by area, one delete tool, plus \`karea_help\`), covering
 **${actionCount} actions**. Every tool takes \`{ action, params }\`:
 
 \`\`\`json
