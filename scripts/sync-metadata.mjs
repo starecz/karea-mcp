@@ -224,6 +224,7 @@ export interface McpToolGroup {
 
 export const MCP_TOOL_COUNT = ${toolCount}
 export const MCP_ACTION_COUNT = ${actionCount}
+export const MCP_VERSION = '${pkg.version}'
 
 export const MCP_TOOL_GROUPS: McpToolGroup[] = ${JSON.stringify(
   [
