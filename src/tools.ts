@@ -97,9 +97,11 @@ export async function pendingReminderNudge(): Promise<string> {
       const lines: string[] = ['', '⏰ Pending reminders:']
       for (const r of items.slice(0, 5)) {
         const t = r.task
-        const display = t?.project?.prefix && typeof t?.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t?.id || '').slice(0, 6)}`
+        // A reminder can be on a meeting instead of a task (KA692).
+        const display = r.meeting ? `meeting "${r.meeting.title}"`
+          : t?.project?.prefix && typeof t?.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t?.id || '').slice(0, 6)}`
         const when = await whenLocal(r.fireAt)
-        const title = r.title || t?.title || 'Reminder'
+        const title = r.title || t?.title || r.meeting?.title || 'Reminder'
         lines.push(`  · [${r.id}] ${display} - ${title} (fires ${when})${r.repeat ? ` [repeat: ${r.repeat}]` : ''}`)
       }
       if (items.length > 5) lines.push(`  … and ${items.length - 5} more.`)
@@ -1694,11 +1696,13 @@ registerTool('karea_unlink_jira', 'Remove the JIRA link from a Karea task', {
 
 function formatReminderLine(r: any, tz = 'UTC'): string {
   const t = r.task || {}
-  const display = t.project?.prefix && typeof t.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t.id || '').slice(0, 6)}`
+  // A reminder can be on a meeting instead of a task (KA692).
+  const display = r.meeting ? `meeting "${r.meeting.title}"`
+    : t.project?.prefix && typeof t.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t.id || '').slice(0, 6)}`
   const when = r.fireAt
     ? new Date(r.fireAt).toLocaleString('en-GB', { timeZone: tz, day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '?'
-  const title = r.title || t.title || 'Reminder'
+  const title = r.title || t.title || r.meeting?.title || 'Reminder'
   const bits = [`[${r.id}] ${display} - ${title} · fires ${when} · status ${r.status}`]
   if (r.repeat) bits.push(`repeat ${r.repeat}`)
   if (r.emailOptIn) bits.push('email on')
@@ -2066,3 +2070,78 @@ export function errorResult(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true as const }
 }
 
+
+// ---------------------------------------------------------------------------
+// Tool annotations (MCP directory review: title + readOnlyHint, plus
+// destructiveHint for anything that changes data)
+// ---------------------------------------------------------------------------
+
+/** Actions that only read. Everything else changes data. */
+const READ_ONLY_ACTION = /^karea_(list_|view_|get_|check_reminders$|recap$|help$)/
+
+/**
+ * Actions that only ADD (create, attach, log, share). Not destructive: they
+ * never remove or overwrite what is there. Edits, deletes, unlinks, status
+ * changes and the free-form assistant (which may do any of those) are.
+ */
+const ADDITIVE_ACTION = /^karea_(create_|add_|quick_task$|doing$|link_|share_project$|upload_resource$)/
+
+/** Talks to a system outside Karea (Jira). */
+const OPEN_WORLD_ACTION = /jira/
+
+export interface ToolHints {
+  title: string
+  readOnlyHint: boolean
+  destructiveHint: boolean
+  idempotentHint: boolean
+  openWorldHint: boolean
+}
+
+/** "karea_create_task" -> "Create task". */
+export function actionTitle(name: string): string {
+  if (name === 'karea_help') return 'Karea action help'
+  const words = name.replace(/^karea_/, '').split('_')
+  const t = words.join(' ')
+  return t.charAt(0).toUpperCase() + t.slice(1)
+}
+
+export function actionAnnotations(name: string): ToolHints {
+  const readOnly = READ_ONLY_ACTION.test(name)
+  return {
+    title: actionTitle(name),
+    readOnlyHint: readOnly,
+    destructiveHint: !readOnly && !ADDITIVE_ACTION.test(name),
+    idempotentHint: readOnly,
+    openWorldHint: OPEN_WORLD_ACTION.test(name),
+  }
+}
+
+const GROUP_TITLES: Record<string, string> = {
+  karea_projects: 'Karea projects and categories',
+  karea_tasks: 'Karea tasks',
+  karea_subtasks: 'Karea subtasks and closing requisites',
+  karea_notes: 'Karea notes and sticky notes',
+  karea_docs: 'Karea task documents and AI context',
+  karea_questions: 'Karea open questions',
+  karea_resources: 'Karea resources',
+  karea_meetings: 'Karea meetings',
+  karea_reminders: 'Karea reminders',
+  karea_integrations: 'Karea integrations (Jira, AI sessions)',
+  karea_assistant: 'Karea AI assistant and recap',
+}
+
+/**
+ * A grouped tool's hints are the most cautious of its actions: read-only
+ * only if every action is, destructive if any action is.
+ */
+export function groupAnnotations(group: { tool: string; actions: string[] }): ToolHints {
+  const each = group.actions.map(actionAnnotations)
+  const readOnly = each.every((h) => h.readOnlyHint)
+  return {
+    title: GROUP_TITLES[group.tool] ?? actionTitle(group.tool),
+    readOnlyHint: readOnly,
+    destructiveHint: each.some((h) => h.destructiveHint),
+    idempotentHint: readOnly,
+    openWorldHint: each.some((h) => h.openWorldHint),
+  }
+}

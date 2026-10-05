@@ -5,7 +5,7 @@ import { z } from 'zod'
 
 // KA395: the stdio entrypoint. Everything it serves lives in tools.ts, so
 // the hosted HTTP endpoint can serve exactly the same surface.
-import { toolRegistry, TOOL_GROUPS, groupDescription, errorResult, pendingReminderNudge } from './tools'
+import { toolRegistry, TOOL_GROUPS, groupDescription, errorResult, pendingReminderNudge, actionAnnotations, groupAnnotations, type ToolHints } from './tools'
 
 const server = new McpServer({
   name: 'karea',
@@ -63,8 +63,19 @@ type ToolRegistrar = (
   description: string,
   shape: Record<string, z.ZodTypeAny>,
   handler: (args: any) => Promise<any>,
+  hints?: ToolHints,
 ) => void
-const registerOnServer = server.tool.bind(server) as unknown as ToolRegistrar
+/**
+ * Every tool is registered with a title and its behaviour hints
+ * (readOnlyHint, destructiveHint, idempotentHint, openWorldHint) - the MCP
+ * directory review requires them, and clients use them to decide when to ask
+ * the user before a call.
+ */
+const registerOnServer: ToolRegistrar = (name, description, shape, handler, hints) => {
+  const h = hints ?? actionAnnotations(name)
+  const { title, ...annotations } = h
+  ;(server as any).registerTool(name, { title, description, inputSchema: shape, annotations: { title, ...annotations } }, handler)
+}
 
 function registerCompactSurface() {
   const grouped = new Set<string>()
@@ -93,6 +104,7 @@ function registerCompactSurface() {
         }
         return entry.handler(parsed.data)
       },
+      groupAnnotations({ tool: group.tool, actions }),
     )
   }
 

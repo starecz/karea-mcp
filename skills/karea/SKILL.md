@@ -79,10 +79,11 @@ Called through `karea_tasks` or `karea_subtasks` or `karea_docs`.
 | `karea_create_subtask` | Create a subtask under a parent. Takes `parent` (visual ID like `KPL77`, name, or UUID) plus the same flags as `karea_create_task`. Inherits the parent's category by default. |
 | `karea_list_subtasks` | List subtasks of a parent task. Accepts `parent` as visual ID, name, or UUID. |
 | `karea_edit_task` | Edit any field of a task: `name` (rename), `priority`, `status`, `sla`, `description` (Markdown), `markdown`, `category`, `tags` (with `clearTags` to replace), `closingRequisites` (with `clearClosingRequisites`), `jiraIssueKey` (set to `"unlink"` to remove), or `note` to append a note. |
+| `karea_edit_tasks` | **The same change applied to many tasks, in ONE request**: `tasks` (array of refs) plus any of `status`, `priority`, `category`, `sla`, `assignee`, `note`. Returns a per-task result; an unresolvable ref is reported without costing the rest. Up to 5000 per call. Use this instead of looping `karea_edit_task` -- looping is N calls against a 60/min limiter to express one intention. |
 | `karea_close_task` | Close a task; optional `resolution`. |
 | `karea_delete_task` | Delete; requires `confirm: true`. |
 | `karea_doing` | Create a task already in `in_progress` status. |
-| `karea_done` | Close many tasks at once (array of refs). |
+| `karea_done` | **Close many tasks at once** (array of refs), in one request. Use this rather than calling `karea_close_task` N times; `karea_close_task` is for a single task where the closing-requisite check matters. |
 | `karea_quick_task` | "I just did this" log entry (`/did`). |
 | `karea_get_markdown` / `karea_set_markdown` | Read/write the long-form markdown doc on a task -- **use this to persist investigation notes**. |
 | `karea_get_context` / `karea_set_context` | Read/write the task's **Context** -- titled entries of AI working memory that hold the **full history** of a task (what was tried, decided, discovered, abandoned) across sessions (e.g. `Plan`, `Findings`, `Decisions`, `Gotchas`, `Attempted`). `karea_set_context` upserts by `title` (default `General`); empty content deletes the entry. Read FIRST when picking a task up, then update **incrementally** -- never overwrite with just the current status. Distinct from notes (human-readable) and markdown (long-form docs). |
@@ -263,6 +264,20 @@ When you report back to the user, **include the Link** so they can click straigh
 - **Status values**: `open`, `in_progress` ("Doing"), `blocked`, `review`, `backlog`, `done`. When the user says "doing" they mean `in_progress`; when they say "review" they mean `review`.
 - **Priority**: `1` = critical, `5` = minor. Default is `3`.
 - **SLA shortcuts**: `2d`, `5h`, `30m`, `1w`, `tomorrow`, `monday`.
+- **Review stages**: a task in `review` also carries a **stage** saying who is holding it -- by default `Developer review`, `Peer review`, `Client review`, and each project can define its own. Set it with `reviewStage` on `karea_edit_task`; passing one moves the task into Review if it is not there already. Projects can turn the feature off, in which case it is rejected. `karea_view_task` shows it as `review: peer review`.
+
+## Bulk first
+
+When the same operation applies to more than one record, there is a bulk action for it. **Use it.**
+
+| Instead of | Call |
+|---|---|
+| `karea_edit_task` N times | `karea_edit_tasks({ tasks: [...], status: "done" })` |
+| `karea_close_task` N times | `karea_done({ tasks: [...] })` |
+| `karea_view_task` N times | `karea_view_tasks({ tasks: [...] })` -- max 50 |
+| `karea_add_note` N times, same text | `karea_add_note({ tasks: [...], content })` |
+
+Each of these is one HTTP request and one database transaction. The looped version is N requests against a **60 per minute** rate limiter, and it trips at about eight. The only reason to loop is when each record needs a *different* value.
 
 ## Session linking -- do this automatically
 
