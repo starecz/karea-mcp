@@ -1,7 +1,7 @@
 /**
  * KA395: the tool surface, with no transport attached.
  *
- * Split out of index.ts so the same 68 actions can be served two ways: over
+ * Split out of index.ts so the same actions can be served two ways: over
  * stdio by the npm package (index.ts, unchanged behaviour) and over HTTP by
  * the hosted MCP endpoint at mcp.karea.app. Reimplementing them for the second
  * transport would have meant two surfaces drifting apart, which is the one
@@ -1297,7 +1297,7 @@ registerTool('karea_list_notes', 'List the notes (human-readable updates) on a t
   return { content: [{ type: 'text', text: lines.join('\n\n') }] }
 })
 
-// KA510: sticky notes. Deliberately folded into the karea_notes group rather
+// KA510: sticky notes. Deliberately folded into the notes tools (karea_read / karea_notes_write) rather
 // than given a tool of their own - "notes" is what they are, and the surface
 // is scored on staying small.
 registerTool('karea_list_sticky_notes', 'List the user\'s sticky notes - the scratch pad: short reminders, commands, URLs. Not tasks: they have no status, assignee or deadline. Pass projectId to get that project\'s notes plus the global ones. Read-only.', {

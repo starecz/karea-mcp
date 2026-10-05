@@ -7,7 +7,7 @@
  *   - mcp/server.json          (Official MCP Registry manifest)
  *   - mcp/smithery.yaml        (Smithery directory manifest)
  *   - mcp/README.md            (tool count + tool catalogue between markers)
- *   - src/app/dashboard/help/mcp-tools.generated.ts  (the in-app help page)
+ *   - src/app/dashboard/docs/mcp-tools.generated.ts  (the Docs page)
  *   - public/karea-skill/SKILL.md  (catalogue between markers)
  *
  * glama.json is NOT generated - it is hand-written and lives at the root of
@@ -15,7 +15,7 @@
  * which is how Glama proves ownership; nothing derives from the tool list.
  *   - claude-skill/SKILL.md        (catalogue between markers)
  *
- * KA492: the help page used to hand-maintain its own list of tools. It drifted
+ * KA492: the Docs page (then called Help) used to hand-maintain its own list of tools. It drifted
  * to 33 flat tools that no longer existed in that shape. Anything that
  * describes the tool surface is generated from here now, so it cannot.
  *
@@ -238,7 +238,7 @@ export const MCP_TOOL_GROUPS: McpToolGroup[] = ${JSON.stringify(
   2,
 )}
 `
-writeFileSync(join(appRoot, 'src/app/dashboard/help/mcp-tools.generated.ts'), generatedTs)
+writeFileSync(join(appRoot, 'src/app/dashboard/docs/mcp-tools.generated.ts'), generatedTs)
 
 // The skill docs carry the same catalogue, in markdown, between markers.
 const skillCatalogue = `<!-- SYNC:TOOL_CATALOGUE -->
@@ -267,7 +267,7 @@ for (const rel of ['public/karea-skill/SKILL.md', 'claude-skill/SKILL.md']) {
   writeFileSync(abs, doc)
 }
 
-console.log(`[sync-metadata] wrote help page data + 2 skill catalogues`)
+console.log(`[sync-metadata] wrote Docs page data + 2 skill catalogues`)
 
 // KA515: rebuild the downloadable skill tarball.
 //
