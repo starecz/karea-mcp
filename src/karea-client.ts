@@ -38,6 +38,13 @@ async function request(path: string, options: RequestInit = {}) {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
+    // KA761: a write during a deploy window used to surface as the bare word
+    // "maintenance" (the 503's error code), with nothing saying it was
+    // temporary or what to do about it.
+    if (body?.error === 'maintenance') {
+      const until = body.expiresAt ? ` at the latest until ${body.expiresAt}` : ''
+      throw new Error(`Karea is in maintenance (being updated), so changes are paused${until}: ${body.message || 'writes are temporarily disabled'}. Nothing was changed. Reads still work. Retry this same call in a few minutes.`)
+    }
     throw new Error(body.error || body.response || `API error: ${res.status}`)
   }
 
@@ -49,17 +56,28 @@ async function request(path: string, options: RequestInit = {}) {
 // resolve name → id - doubling the wall-clock latency of every context /
 // markdown / resource call. Same MCP process reuses the cache within the TTL.
 const PROJECTS_TTL_MS = 30_000
-let projectsCache: { at: number; value: any[] } | null = null
+// KA761: keyed by credential. The hosted endpoint serves many users from one
+// process, and a single shared entry handed one user's project list to the
+// next caller within the TTL.
+const projectsCache = new Map<string, { at: number; value: any[] }>()
 
-export async function listProjects(): Promise<any[]> {
+function cacheKey(): string {
+  const ctx = callContext.getStore()
+  return `${ctx?.baseUrl || KAREA_URL}|${ctx?.apiKey || KAREA_API_KEY}`
+}
+
+export async function listProjects(opts: { fresh?: boolean } = {}): Promise<any[]> {
   const now = Date.now()
-  if (projectsCache && now - projectsCache.at < PROJECTS_TTL_MS) return projectsCache.value
+  const key = cacheKey()
+  const hit = projectsCache.get(key)
+  if (!opts.fresh && hit && now - hit.at < PROJECTS_TTL_MS) return hit.value
   const value = await request('/api/projects') as any[]
-  projectsCache = { at: now, value }
+  if (projectsCache.size > 500) projectsCache.clear()
+  projectsCache.set(key, { at: now, value })
   return value
 }
 
-export function invalidateProjectsCache() { projectsCache = null }
+export function invalidateProjectsCache() { projectsCache.delete(cacheKey()) }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -88,14 +106,54 @@ export async function listTasks(opts: {
   return request(`/api/tasks/export?${params}`)
 }
 
+/**
+ * KA761: the ONE way a `projectId` param (name, prefix or id) becomes an id,
+ * used by every action. It used to be an exact-name match that returned
+ * undefined on a miss, so some actions silently ignored a project they could
+ * not find (view_task searched everywhere) while others said "Project not
+ * found" (create_question) for the same input.
+ *
+ * Tried in order, first stage with any hit wins: id, exact name, prefix,
+ * a "/"-separated part of the name ("Harrier" -> "Statista/Harrier"), then a
+ * name containing the text. One hit resolves; several are an error listing
+ * them; none is an error listing the caller's projects.
+ */
 export async function resolveProjectId(nameOrId: string): Promise<string | undefined> {
+  const wanted = (nameOrId || '').trim()
+  if (!wanted) return undefined
   // KA364: skip the HTTP round-trip when the caller already gave us a UUID.
-  if (UUID_RE.test(nameOrId)) return nameOrId
-  const projects = await listProjects()
-  const match = projects.find((p: any) =>
-    p.id === nameOrId || p.name.toLowerCase() === nameOrId.toLowerCase()
-  )
-  return match?.id
+  if (UUID_RE.test(wanted)) return wanted
+  let projects = await listProjects()
+  let found = matchProject(projects, wanted)
+  // A project made in the last 30s is not in the cache yet: one fresh read.
+  if (found.length === 0) {
+    projects = await listProjects({ fresh: true })
+    found = matchProject(projects, wanted)
+  }
+  const label = (p: any) => `${p.name}${p.prefix ? ` (${p.prefix})` : ''}`
+  if (found.length === 1) return found[0].id
+  if (found.length > 1) {
+    throw new Error(`"${wanted}" matches ${found.length} projects: ${found.map(label).join(', ')}. Pass the full name, the prefix or the id of one.`)
+  }
+  const all = projects.map(label)
+  throw new Error(`No project matches "${wanted}". Your projects: ${all.slice(0, 30).join(', ')}${all.length > 30 ? `, and ${all.length - 30} more` : ''}. Pass a name, prefix or id from this list (karea_list_projects shows them all).`)
+}
+
+function matchProject(projects: any[], wanted: string): any[] {
+  const w = wanted.toLowerCase()
+  const name = (p: any) => String(p.name || '').toLowerCase()
+  const stages: ((p: any) => boolean)[] = [
+    (p) => p.id === wanted,
+    (p) => name(p) === w,
+    (p) => typeof p.prefix === 'string' && p.prefix.toLowerCase() === w,
+    (p) => name(p).split('/').map((s) => s.trim()).includes(w),
+    (p) => name(p).includes(w),
+  ]
+  for (const test of stages) {
+    const hits = projects.filter(test)
+    if (hits.length) return hits
+  }
+  return []
 }
 
 export async function sendCommand(input: string, projectId?: string) {
@@ -167,6 +225,11 @@ export async function createQuestion(data: { projectId: string; question: string
   return request('/api/questions', { method: 'POST', body: JSON.stringify(data) })
 }
 
+/** KA735: one question, by UUID or short ID ("KAQ12"). */
+export async function getQuestion(ref: string) {
+  return request(`/api/questions/${encodeURIComponent(ref)}`)
+}
+
 export async function updateQuestion(id: string, data: any) {
   return request(`/api/questions/${id}`, { method: 'PATCH', body: JSON.stringify(data) })
 }
@@ -215,7 +278,7 @@ export async function downloadResourceBytes(id: string): Promise<{ base64: strin
   }
 }
 
-export async function createTextResource(data: { name: string; content: string; projectId?: string | null; folder?: string | null }) {
+export async function createTextResource(data: { name: string; content: string; projectId?: string | null; folder?: string | null; taskId?: string }) {
   return request('/api/resources', {
     method: 'POST',
     body: JSON.stringify({ type: 'text', ...data }),
@@ -262,7 +325,7 @@ export async function pendingReminders() {
   const data = await request('/api/reminders/pending')
   return data.items || []
 }
-export async function createReminder(payload: { taskId: string; title?: string | null; fireAt: string; repeat?: 'daily' | 'weekly' | 'monthly' | null; emailOptIn?: boolean }) {
+export async function createReminder(payload: { taskId?: string; questionId?: string; title?: string | null; fireAt: string; repeat?: 'daily' | 'weekly' | 'monthly' | null; emailOptIn?: boolean }) {
   return request('/api/reminders', { method: 'POST', body: JSON.stringify(payload) })
 }
 export async function patchReminder(id: string, payload: Record<string, unknown>) {

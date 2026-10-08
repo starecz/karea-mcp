@@ -5,12 +5,14 @@ import { z } from 'zod'
 
 // KA395: the stdio entrypoint. Everything it serves lives in tools.ts, so
 // the hosted HTTP endpoint can serve exactly the same surface.
-import { toolRegistry, TOOL_GROUPS, groupDescription, errorResult, pendingReminderNudge, actionAnnotations, groupAnnotations, type ToolHints } from './tools'
+import { toolRegistry, TOOL_GROUPS, groupDescription, errorResult, pendingReminderNudge, actionAnnotations, groupAnnotations, routeAction, helpResult, HELP_TOOL_DESCRIPTION, serverInstructions, type ToolHints } from './tools'
 
-const server = new McpServer({
-  name: 'karea',
-  version: '0.1.0',
-})
+// KA761: say how the tools are called at `initialize`, as the hosted
+// endpoint does (not for the legacy one-tool-per-action surface).
+const server = new McpServer(
+  { name: 'karea', version: '0.1.0' },
+  process.env.KAREA_MCP_LEGACY_TOOLS === '1' ? {} : { instructions: serverInstructions(process.env.KAREA_PUBLIC_URL || 'https://karea.app') },
+)
 
 // Wrap server.tool so every registered handler auto-appends the reminder
 // nudge to its text response. Preserves the original signature exactly.
@@ -89,12 +91,18 @@ function registerCompactSurface() {
       group.tool,
       groupDescription(group),
       {
-        action: z.enum(actions as [string, ...string[]]).describe('Which operation to perform. See the list in this tool\'s description.'),
+        // KA761: the enum is still what clients see, but a value outside it
+        // reaches the handler (`.catch` passes the raw input through) so the
+        // caller is told which tool owns the action, or which name it meant,
+        // instead of a bare enum mismatch. "list_notes" is accepted too.
+        action: z.enum(actions as [string, ...string[]]).catch((ctx: any) => ctx.input).describe('Which operation to perform: one of the actions listed in this tool\'s description (an action name, not a tool name).'),
         params: z.record(z.any()).optional().describe('Arguments for the chosen action, as an object. Omit for actions that take none.'),
       },
       async ({ action, params }: { action: string; params?: Record<string, any> }) => {
-        const entry = toolRegistry.get(action)
-        if (!entry) return errorResult(`Unknown action "${action}".`)
+        const route = routeAction(group.tool, action)
+        if (!route.ok) return errorResult(route.message)
+        const { entry } = route
+        action = route.action
         // The action's own schema still validates, so a bad call fails the
         // same way and with the same message it always did.
         const parsed = z.object(entry.shape).safeParse(params ?? {})
@@ -118,42 +126,11 @@ function registerCompactSurface() {
 
   registerOnServer(
     'karea_help',
-    'Return the full JSON Schema and description of any Karea action, so you can call it correctly through its group tool. Read-only; changes nothing. Omit `action` to list every available action grouped by tool.',
+    HELP_TOOL_DESCRIPTION,
     {
-      action: z.string().optional().describe('An action name, e.g. "karea_create_task". Omit to list all of them.'),
+      action: z.string().optional().describe('An action name, e.g. "karea_create_task" (or "create_task"). Omit to list all of them.'),
     },
-    async ({ action }: { action?: string }) => {
-      if (!action) {
-        const lines: string[] = []
-        for (const group of TOOL_GROUPS) {
-          const actions = group.actions.filter((a) => toolRegistry.has(a))
-          if (actions.length === 0) continue
-          lines.push(`${group.tool}: ${actions.join(', ')}`)
-        }
-        return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
-      }
-      const entry = toolRegistry.get(action)
-      if (!entry) {
-        return errorResult(`Unknown action "${action}". Call karea_help with no arguments to list them all.`)
-      }
-      const params = Object.entries(entry.shape).map(([key, schema]) => ({
-        name: key,
-        required: !schema.isOptional(),
-        description: schema.description || '',
-      }))
-      const group = TOOL_GROUPS.find((g) => g.actions.includes(action))
-      const text = [
-        `${action}${group ? ` (call it through ${group.tool})` : ''}`,
-        '',
-        entry.description,
-        '',
-        'Parameters:',
-        ...(params.length
-          ? params.map((p) => `- ${p.name}${p.required ? '' : ' (optional)'}: ${p.description}`)
-          : ['(none)']),
-      ].join('\n')
-      return { content: [{ type: 'text' as const, text }] }
-    },
+    async ({ action }: { action?: string }) => helpResult(action),
   )
 }
 

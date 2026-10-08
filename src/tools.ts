@@ -97,11 +97,12 @@ export async function pendingReminderNudge(): Promise<string> {
       const lines: string[] = ['', '⏰ Pending reminders:']
       for (const r of items.slice(0, 5)) {
         const t = r.task
-        // A reminder can be on a meeting instead of a task (KA692).
+        // A reminder can be on a meeting (KA692) or an open question (KA735) instead of a task.
         const display = r.meeting ? `meeting "${r.meeting.title}"`
+          : r.question ? `question ${typeof r.question.seq === 'number' ? `${r.question.project?.prefix ?? ''}Q${r.question.seq}` : `"${r.question.question}"`}`
           : t?.project?.prefix && typeof t?.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t?.id || '').slice(0, 6)}`
         const when = await whenLocal(r.fireAt)
-        const title = r.title || t?.title || r.meeting?.title || 'Reminder'
+        const title = r.title || t?.title || r.meeting?.title || r.question?.question || 'Reminder'
         lines.push(`  · [${r.id}] ${display} - ${title} (fires ${when})${r.repeat ? ` [repeat: ${r.repeat}]` : ''}`)
       }
       if (items.length > 5) lines.push(`  … and ${items.length - 5} more.`)
@@ -119,6 +120,41 @@ async function resolveProject(nameOrId?: string): Promise<string | undefined> {
   if (!nameOrId) return undefined
   return karea.resolveProjectId(nameOrId)
 }
+
+/**
+ * KA741: a list action needs at least one filter.
+ *
+ * With every filter optional, "list my tasks" was one call that returned a
+ * whole account: every task, question, meeting or file, straight into the
+ * agent's context. Requiring one filter makes the agent say what it is
+ * looking for, and the error names the filters so it can retry at once.
+ * Returns the error result to send back, or null when a filter was given.
+ */
+function requireFilter(action: string, params: Record<string, unknown>, accepted: string[]) {
+  const given = accepted.some((k) => {
+    const v = params[k]
+    return v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && v.length === 0)
+  })
+  if (given) return null
+  return errorResult(`${action} needs at least one filter, so one call cannot return everything at once. Accepted filters: ${accepted.join(', ')}. Pass the one that matches what you are looking for and call again.`)
+}
+
+/**
+ * KA761: every deadline param says the same thing, and says what parseSLA in
+ * src/lib/command-parser.ts really accepts (a time of day was only reachable
+ * through an undocumented ISO string).
+ */
+const SLA_FORMS = 'Deadline, in the user\'s timezone: relative (30m, 5h, 2d, 1w); a day (today = 18:00, eod, tomorrow or a weekday = 09:00); a day with a time (today 13:30, tomorrow 9:00, friday at 17:00, mon 2pm); a time alone (13:30, the next time it comes round); or a date (2026-10-20, 2026-10-20 13:30).'
+
+/**
+ * KA764: how to reference another item from text Karea renders as a note or
+ * description, so it shows as a pill with a hover preview rather than as a
+ * plain name. These are the links the in-app `@` picker inserts
+ * (`/api/mentions`), rendered by `NoteMarkdown` / `MentionPill`. Questions,
+ * meetings and resources are previewed by UUID only (`/api/mentions/preview`),
+ * so the UUID is required there; `[[KAQ3]]` would be read as a task ID.
+ */
+const MENTION_SYNTAX = 'To reference another item so it shows as a link with a hover preview (not a plain name): task [[KA12]]; open question [KAQ3](https://karea.app/dashboard/questions?open=<question UUID>); meeting [Title](https://karea.app/dashboard/meetings?open=<meeting UUID>); resource [name](https://karea.app/dashboard/resources?open=<resource UUID>). Use the full https://karea.app URL, so the link still works when the text is copied to Jira or elsewhere. Get UUIDs from the list/view actions (the "ID:" lines).'
 
 // KA367: shared session-link params. Any task-referencing tool that accepts
 // these will atomically link the AI session to the target task after the
@@ -196,8 +232,8 @@ registerTool('karea_list_projects', 'List all Karea projects with their IDs', {}
 })
 
 // List tasks
-registerTool('karea_list_tasks', 'List tasks in a project. Defaults to open tasks (open, in_progress, blocked, review, backlog) capped at 200 to keep responses small. To see closed tasks pass status="done" and optionally closedSince (e.g. "14d", "7d", "24h"). To list everything, pass status="all". Optional filters (category, priority, assignee, search) narrow the result server-side - prefer them over post-filtering.', {
-  projectId: z.string().optional().describe('Project name or ID (omit for default project)'),
+registerTool('karea_list_tasks', 'List tasks in a project. Requires at least one filter: projectId, status, closedSince, category, priority, assignee or search (a call with none is refused). Defaults to open tasks (open, in_progress, blocked, review, backlog) capped at 200 to keep responses small. To see closed tasks pass status="done" and optionally closedSince (e.g. "14d", "7d", "24h"). For every status pass status="all". The filters narrow the result server-side - prefer them over post-filtering.', {
+  projectId: z.string().optional().describe('Project name or ID. Counts as a filter; when omitted, the other filters apply to the default project.'),
   status: z.string().optional().describe('Filter by status: open, in_progress, blocked, review, backlog, done, cancelled. Comma-separated allowed (e.g. "open,in_progress"). "all" returns every status.'),
   closedSince: z.string().optional().describe('Only return tasks closed since this window. Relative (e.g. "14d", "7d", "24h") or ISO date. Implies status=done unless status is set.'),
   limit: z.number().int().positive().max(1000).optional().describe('Max tasks to return (default 200, cap 1000).'),
@@ -206,6 +242,8 @@ registerTool('karea_list_tasks', 'List tasks in a project. Defaults to open task
   assignee: z.string().optional().describe('Assignee - name, email, or user UUID.'),
   search: z.string().optional().describe('Case-insensitive substring match on the task title.'),
 }, async ({ projectId, status, closedSince, limit, category, priority, assignee, search }) => {
+  const noFilter = requireFilter('karea_list_tasks', { projectId, status, closedSince, category, priority, assignee, search }, ['projectId', 'status', 'closedSince', 'category', 'priority', 'assignee', 'search'])
+  if (noFilter) return noFilter
   const pid = await resolveProject(projectId)
 
   let resolvedStatus = status
@@ -261,13 +299,13 @@ registerTool('karea_create_task', 'Create a new task in a project and return it 
   name: z.string().describe('Task title'),
   category: z.string().optional().describe('Category name'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
-  sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
-  description: z.string().optional().describe('Task description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short (a few sentences); use `markdown` for long-form docs.'),
+  sla: z.string().optional().describe(SLA_FORMS),
+  description: z.string().optional().describe(`Task description. Rendered as Markdown - use \`**bold**\`, lists, \`code\`, links, etc. Keep it short (a few sentences); use \`markdown\` for long-form docs. ${MENTION_SYNTAX}`),
   markdown: z.string().optional().describe('Long-form markdown content - use for investigation findings, technical/functional docs, solution design, root cause analysis. This is the task\'s knowledge base.'),
   source: z.string().optional().describe('Where this task came from'),
   closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing. Keep each one short and concrete - 1 short sentence, ideally under ~120 chars (e.g. "Tests pass in CI", "PR approved"). Do NOT write paragraphs.'),
   tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (verify with karea_view_task or the project list). Do NOT invent new tags unless the user explicitly asked for one - a typo or a paraphrase spawns duplicate tags. When unsure, omit and ask the user.'),
-  parentId: z.string().optional().describe('Parent task ID to create this as a subtask'),
+  parentId: z.string().optional().describe('Parent task (visual ID like KA12, name, or UUID) to create this as a subtask'),
   jiraIssueKey: z.string().optional().describe('JIRA issue key to link (e.g. PROJ-123). Issue must exist in JIRA.'),
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
@@ -289,7 +327,8 @@ registerTool('karea_create_task', 'Create a new task in a project and return it 
 
   if (result.taskId) {
     if (params.parentId) {
-      await karea.updateTask(result.taskId, { parentId: params.parentId })
+      // KA761: a visual ID or name works here too, not only a UUID.
+      await karea.updateTask(result.taskId, { parentId: await resolveTaskId(params.parentId, pid) })
     }
     if (params.markdown) {
       await karea.setMarkdown(result.taskId, params.markdown, pid)
@@ -312,17 +351,18 @@ registerTool('karea_create_task', 'Create a new task in a project and return it 
 })
 
 // Edit task
-registerTool('karea_edit_task', 'Update fields of an existing task (title, status, priority, deadline, category, assignee, description, tags, or add a note) located by visual ID, name or UUID. Only the fields you pass change; the rest are left untouched. Returns the updated task.', {
+registerTool('karea_edit_task', 'Update fields of an existing task (title, status, priority, deadline, category, description, tags, or add a note) located by visual ID, name or UUID. Only the fields you pass change; the rest are left untouched. To change the assignee use karea_edit_tasks with this one task. Returns the updated task.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   name: z.string().optional().describe('New task title (rename the task)'),
   priority: z.number().min(1).max(5).optional().describe('New priority'),
   status: z.string().optional().describe('New status: open, in_progress, blocked, review, done'),
+  closeSubtasks: z.boolean().optional().describe('Only when the task has open subtasks: true closes them too, false closes only this task (they stay open). Without it such a close is refused and the reply lists the subtasks: ASK THE USER which they want, then call again with their answer.'),
   reviewStage: z.string().optional().describe('KA602: who is reviewing it, for a task in Review - a stage name or slug from the project (defaults are Developer review, Peer review, Client review). Passing one also moves the task into Review if it is not there already. Rejected when the project has review stages turned off.'),
-  sla: z.string().optional().describe('New deadline'),
-  description: z.string().optional().describe('New description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short (a few sentences); use `markdown` for long-form docs.'),
+  sla: z.string().optional().describe(`New deadline. ${SLA_FORMS} "null" clears it.`),
+  description: z.string().optional().describe(`New description. Rendered as Markdown - use \`**bold**\`, lists, \`code\`, links, etc. Keep it short (a few sentences); use \`markdown\` for long-form docs. ${MENTION_SYNTAX}`),
   markdown: z.string().optional().describe('Long-form markdown content - use for investigation findings, technical/functional docs, solution design, root cause analysis. Overwrites existing markdown; read first with karea_get_markdown to append.'),
   category: z.string().optional().describe('Move to category'),
-  note: z.string().optional().describe('Add a human-readable note (the user reads these). Markdown is supported (lists, **bold**, `code`, links) - use it when it makes the note more readable; plain text is also fine. For private AI cross-session working memory use karea_set_context instead.'),
+  note: z.string().optional().describe('Add a human-readable note (the user reads these). Markdown is supported (lists, **bold**, `code`, links) - use it when it makes the note more readable; plain text is also fine. For private AI cross-session working memory use karea_set_context instead. ' + MENTION_SYNTAX),
   tags: z.array(z.string()).optional().describe('Tags to attach. STRICT: only pass tags that already exist in this project (check karea_view_task first). Do NOT invent new tags unless the user explicitly asked for one - the API upserts by name and typos create duplicates. When unsure, omit and ask.'),
   clearTags: z.boolean().optional().describe('Remove all existing tags before adding new ones'),
   closingRequisites: z.array(z.string()).optional().describe('Closing requisites to add. Keep each short and concrete - 1 short sentence, ideally under ~120 chars. Do NOT write paragraphs.'),
@@ -343,6 +383,7 @@ registerTool('karea_edit_task', 'Update fields of an existing task (title, statu
   if (params.category) cmd += ` -cat ${q(params.category)}`
   if (params.clearTags) cmd += ` -cleartags`
   if (params.tags?.length) cmd += ` -tags ${params.tags.map((t: string) => q(t)).join(' ')}`
+  if (params.closeSubtasks !== undefined) cmd += ` -subtasks ${params.closeSubtasks ? 'all' : 'only'}`
 
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(cmd, pid)
@@ -498,8 +539,8 @@ registerTool('karea_edit_tasks', 'Apply the SAME change to many tasks in ONE req
   status: z.string().optional().describe('New status for all of them: open, in_progress, blocked, review, done, cancelled, backlog'),
   priority: z.number().min(1).max(5).optional().describe('New priority for all of them'),
   category: z.string().optional().describe('Move all of them to this category (by name). A task whose project has no such category is reported, not silently skipped.'),
-  sla: z.string().optional().describe('New deadline for all of them - "5d", "tomorrow", "monday", or an ISO date'),
-  note: z.string().optional().describe('Add this note to every one of them'),
+  sla: z.string().optional().describe(`New deadline for all of them. ${SLA_FORMS}`),
+  note: z.string().optional().describe(`Add this note to every one of them. ${MENTION_SYNTAX}`),
 }, async (params) => {
   const body: Record<string, unknown> = { tasks: params.tasks }
   if (params.projectId) body.projectId = params.projectId
@@ -540,11 +581,13 @@ registerTool('karea_edit_tasks', 'Apply the SAME change to many tasks in ONE req
 registerTool('karea_close_task', 'Mark a task as done: sets status to done and stamps the close time. Reports any unmet closing requisites first unless confirm is set. To close several tasks at once use karea_done.', {
   task: z.string().describe('Task name, visual ID, or UUID'),
   resolution: z.string().optional().describe('How it was resolved'),
+  closeSubtasks: z.boolean().optional().describe('Only when the task has open subtasks: true closes them too, false closes only this task (they stay open). Without it such a close is refused and the reply lists the subtasks: ASK THE USER which they want, then call again with their answer.'),
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
 }, async (params) => {
   let cmd = `/ct ${q(params.task)}`
   if (params.resolution) cmd += ` -r ${q(params.resolution)}`
+  if (params.closeSubtasks !== undefined) cmd += ` -subtasks ${params.closeSubtasks ? 'all' : 'only'}`
 
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(cmd, pid)
@@ -593,7 +636,7 @@ registerTool('karea_doing', 'Create a task you are working on right now (status:
   description: z.string().describe('What you are doing'),
   category: z.string().optional().describe('Category name'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
-  sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
+  sla: z.string().optional().describe(SLA_FORMS),
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
 }, async (params) => {
@@ -611,6 +654,18 @@ registerTool('karea_doing', 'Create a task you are working on right now (status:
 })
 
 // View task details
+// KA748: only what changed on one task in a short window, for pollers such
+// as the Claude Code sync mod, instead of re-reading the whole task.
+registerTool('karea_task_changes', 'Return only what changed on one task in the last sinceMinutes minutes (status, fields, notes with a short excerpt, Context entry titles, links...), each with who, how (user = browser, mcp = API/AI, jira, system) and when, newest first. The header has the task\'s status colour, review stage colour and exact last-changed time. Use the LOWEST window possible: 5 minutes recommended, and a poller should pass the minutes since its last check. An empty window returns one short line. Read-only.', {
+  task: z.string().describe('Task name, visual ID (KA12) or UUID'),
+  sinceMinutes: z.number().int().min(1).max(60).describe('Required, 1 to 60. How many minutes back to look; use the smallest window you need (5 recommended).'),
+  projectId: z.string().optional().describe('Project name or ID'),
+}, async (params) => {
+  const pid = await resolveProject(params.projectId)
+  const result = await karea.sendCommand(`/changes ${q(params.task)} -since ${params.sinceMinutes}`, pid)
+  return { content: [{ type: 'text', text: result.response || 'No answer.' }] }
+})
+
 registerTool('karea_view_task', 'Return one task with all its details (status, priority, deadline, recurrence, category, description, notes, requisites, links), located by visual ID, name or UUID. Pass includeContext=true to also inline the task\'s AI Context in the response - avoids a follow-up karea_get_context round-trip. Read-only.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
@@ -831,11 +886,13 @@ registerTool('karea_delete_category', 'Permanently delete a category AND every t
 // Bulk close tasks
 registerTool('karea_done', 'Mark several tasks as done in one call, each given by visual ID or name; returns a per-task result. For a single task with closing-requisite checks, use karea_close_task.', {
   tasks: z.array(z.string()).describe('Task names or visual IDs to close'),
+  closeSubtasks: z.boolean().optional().describe('Only when a task has open subtasks: true closes them too, false closes only this task (they stay open). Without it such a close is refused and the reply lists the subtasks: ASK THE USER which they want, then call again with their answer.'),
   projectId: z.string().optional().describe('Project name or ID'),
-}, async ({ tasks, projectId }) => {
+}, async ({ tasks, projectId, closeSubtasks }) => {
   const pid = await resolveProject(projectId)
   const taskList = tasks.map((t: string) => q(t)).join(' ')
-  const result = await karea.sendCommand(`/done ${taskList}`, pid)
+  const sub = closeSubtasks === undefined ? '' : ` -subtasks ${closeSubtasks ? 'all' : 'only'}`
+  const result = await karea.sendCommand(`/done ${taskList}${sub}`, pid)
   const parts = [result.response || 'Tasks closed.']
   parts.push(...recordFooter('task', { id: result.taskId }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
@@ -845,7 +902,7 @@ registerTool('karea_done', 'Mark several tasks as done in one call, each given b
 registerTool('karea_share_project', 'Give another user access to a project by email at a chosen role (owner, editor, commenter or viewer). Records the share so that user can see and, per role, edit the project.', {
   project: z.string().describe('Project name'),
   email: z.string().describe('User email to share with'),
-  role: z.enum(['owner', 'editor', 'viewer']).optional().describe('Role to assign (default: editor)'),
+  role: z.enum(['owner', 'editor', 'commenter', 'viewer']).optional().describe('Role to assign (default: editor)'),
 }, async ({ project, email, role }) => {
   let cmd = `/share ${q(project)} ${email}`
   if (role) cmd += ` ${role}`
@@ -1017,10 +1074,12 @@ registerTool('karea_set_context', 'Write a titled entry of the task\'s Context -
 })
 
 // List open questions
-registerTool('karea_list_questions', 'List open questions (unresolved decisions or blockers) in a project, newest first. Defaults to status open; pass status to include answered, cancelled or all. Read-only.', {
-  projectId: z.string().optional().describe('Project name or ID'),
-  status: z.string().optional().describe('Filter by status: open, answered, cancelled, all (default: all)'),
+registerTool('karea_list_questions', 'List open questions (unresolved decisions or blockers), newest first. Requires at least one filter: projectId or status (a call with neither is refused). Status open, answered, cancelled or all; with only a projectId every status is returned. Read-only.', {
+  projectId: z.string().optional().describe('Project name or ID. Counts as a filter.'),
+  status: z.string().optional().describe('Filter by status: open, answered, cancelled, all. Counts as a filter; with status alone, questions from every project are returned.'),
 }, async ({ projectId, status }) => {
+  const noFilter = requireFilter('karea_list_questions', { projectId, status }, ['projectId', 'status'])
+  if (noFilter) return noFilter
   const pid = await resolveProject(projectId)
   const data = await karea.listQuestions(pid, status)
   if (!data.length) return { content: [{ type: 'text', text: 'No questions found.' }] }
@@ -1051,9 +1110,13 @@ registerTool('karea_create_question', 'Create an open question (a decision or bl
   const parts = [`Question created: "${params.question}"`]
   const base = publicBase()
   const qPrefix = result?.project?.prefix
-  if (result?.seq != null) parts.push(`Short ID: ${qPrefix ? `${qPrefix}Q${result.seq}` : `Q${result.seq}`}`)
+  const qShort = result?.seq != null ? (qPrefix ? `${qPrefix}Q${result.seq}` : `Q${result.seq}`) : null
+  if (qShort) parts.push(`Short ID: ${qShort}`)
   if (result?.id) parts.push(`ID: ${result.id}`)
-  parts.push(`Link: ${base}/dashboard/questions`)
+  // KA761: straight to the question, not the whole list. The page's ?open=
+  // takes the short ID (KA709) or the UUID.
+  const openRef = (qPrefix && qShort) || result?.id
+  parts.push(`Link: ${base}/dashboard/questions${openRef ? `?open=${encodeURIComponent(openRef)}` : ''}`)
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
@@ -1090,8 +1153,8 @@ registerTool('karea_delete_question', 'Permanently delete an open question. Irre
 })
 
 // List resources
-registerTool('karea_list_resources', 'List resources (text notes & files). With a projectId it returns every resource belonging to that project - whether assigned to it directly, linked to one of its tasks, or filed under a folder named after the project (e.g. knowledge-base docs). Omit projectId to list all your resources, including unfiled ones. All filters combine freely (name query, folder, type, mime, size range).', {
-  projectId: z.string().optional().describe('Project name or ID. Omit to list ALL your resources (including unfiled / knowledge-base items not tied to any task).'),
+registerTool('karea_list_resources', 'List resources (text notes & files). Requires at least one filter: projectId, query, folder, type, mime, minSize or maxSize (a call with none is refused). With a projectId it returns every resource belonging to that project - whether assigned to it directly, linked to one of its tasks, or filed under a folder named after the project (e.g. knowledge-base docs). Without projectId the other filters search all your resources, including unfiled ones. All filters combine freely (name query, folder, type, mime, size range).', {
+  projectId: z.string().optional().describe('Project name or ID. Without it, the other filters search ALL your resources (including unfiled / knowledge-base items not tied to any task).'),
   query: z.string().optional().describe('Fuzzy match against resource name.'),
   folder: z.string().optional().describe('Exact folder path (case-insensitive) - e.g. "docs/api".'),
   type: z.string().optional().describe('"text" for markdown/plain-text resources, "file" for uploaded files.'),
@@ -1099,6 +1162,8 @@ registerTool('karea_list_resources', 'List resources (text notes & files). With 
   minSize: z.number().int().optional().describe('Minimum size in bytes.'),
   maxSize: z.number().int().optional().describe('Maximum size in bytes.'),
 }, async ({ projectId, query, folder, type, mime, minSize, maxSize }) => {
+  const noFilter = requireFilter('karea_list_resources', { projectId, query, folder, type, mime, minSize, maxSize }, ['projectId', 'query', 'folder', 'type', 'mime', 'minSize', 'maxSize'])
+  if (noFilter) return noFilter
   const pid = await resolveProject(projectId)
   const resources = await karea.listResources({ projectId: pid, query, folder, type, mime, minSize, maxSize })
   if (!resources.length) return { content: [{ type: 'text', text: 'No resources found.' }] }
@@ -1170,15 +1235,21 @@ registerTool('karea_get_resource', 'Return a resource with its full content and 
 })
 
 // Create text resource
-registerTool('karea_create_resource', 'Create a text resource (a note or document) in a project or folder and return it with its ID. To attach an existing resource to a task, use karea_link_resource_to_task.', {
-  name: z.string().describe('Resource name'),
+registerTool('karea_create_resource', 'Create a text resource (a note or document) in a project or folder and return it with its ID. Include a file extension in the name (e.g. "notes.md", "data.csv"): text resources store no MIME type, so the extension is their only format. ".md" renders as Markdown, ".csv" as a table, and downloads keep the type; without an extension it is plain text with no format. Pass `task` to link the new resource to a task in the same call (it also goes into that task\'s folder unless you set one). To attach an existing resource to a task, use karea_link_resource_to_task.', {
+  name: z.string().describe('Resource name, with a file extension (e.g. "notes.md", "data.csv"). The extension sets the format; without one the resource is plain text with no format.'),
   content: z.string().describe('Text content'),
   projectId: z.string().optional().describe('Project name or ID'),
   folder: z.string().optional().describe('Folder path'),
+  task: z.string().optional().describe('Task to link the new resource to: visual ID (KA123), UUID or name.'),
+  taskId: z.string().optional().describe('Same as `task`.'),
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
-  const resource = await karea.createTextResource({ name: params.name, content: params.content, projectId: pid, folder: params.folder })
+  const taskRef = params.task || params.taskId
+  const taskId = taskRef ? await resolveTaskId(taskRef, pid) : undefined
+  const resource = await karea.createTextResource({ name: params.name, content: params.content, projectId: pid, folder: params.folder, taskId })
   const parts = [`Resource "${resource.name}" created.`]
+  const linkLine = linkedTaskLine(resource, taskRef)
+  if (linkLine) parts.push(linkLine)
   parts.push(...recordFooter('resource', { id: resource.id }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
@@ -1186,7 +1257,7 @@ registerTool('karea_create_resource', 'Create a text resource (a note or documen
 // Update text resource
 registerTool('karea_update_resource', 'Overwrite a text resource content and/or metadata, by ID, and return the updated resource. Replaces the existing content rather than appending.', {
   resourceId: z.string().describe('Resource UUID'),
-  name: z.string().optional().describe('New name'),
+  name: z.string().optional().describe('New name. Keep a file extension (e.g. "notes.md"): the format comes from it, so renaming without one leaves the resource with no format.'),
   content: z.string().optional().describe('New text content'),
   folder: z.string().optional().describe('Move to folder'),
 }, async (params) => {
@@ -1209,22 +1280,45 @@ registerTool('karea_delete_resource', 'Permanently delete a resource (text or fi
 })
 
 // Upload a file resource (base64-encoded)
-registerTool('karea_upload_resource', 'Upload a binary file as a resource (base64-encoded)', {
-  name: z.string().describe('File name with extension (e.g. report.pdf)'),
+registerTool('karea_upload_resource', 'Upload a file as a resource (base64-encoded) and return it with its ID. Include a file extension in the name (e.g. "spec.pdf", "notes.md"): when mimeType is omitted the type is taken from the extension, so "spec.pdf" previews as a PDF and "notes.md" is stored as Markdown text. Without an extension (or with one Karea does not know) and no mimeType, the file is stored as an opaque binary (application/octet-stream) with no format and no preview. Text formats (CSV, Markdown, JSON...) are stored as editable text resources, binaries as files. Pass `task` to link the upload to a task in the same call (it also goes into that task\'s folder, Tasks/<prefix>/<ID>, unless you set one); a folder alone does not link.', {
+  name: z.string().describe('File name with extension (e.g. "spec.pdf", "notes.md"). The extension sets the type when mimeType is omitted; without one the file has no format.'),
   data: z.string().describe('Base64-encoded file content'),
-  mimeType: z.string().optional().describe('MIME type (e.g. application/pdf). Auto-detected if omitted.'),
+  mimeType: z.string().optional().describe('MIME type (e.g. application/pdf). If omitted it is taken from the name\'s extension; an unknown or missing extension falls back to application/octet-stream. The content itself is never inspected.'),
   folder: z.string().optional().describe('Folder path to organize the resource'),
-  taskId: z.string().optional().describe('Task UUID to link the resource to'),
+  task: z.string().optional().describe('Task to link the uploaded resource to: visual ID (HR380), UUID or name. Linked in the same call.'),
+  taskId: z.string().optional().describe('Same as `task` (visual ID, UUID or name); kept for older callers.'),
+  projectId: z.string().optional().describe('Project name or ID (helps resolve a visual ID or name in `task`)'),
 }, async (params) => {
   try {
-    const resource = await karea.uploadResource(params.name, params.data, params.mimeType, params.folder, params.taskId)
-    const parts = [`Uploaded "${resource.name}" (${resource.sizeBytes} bytes, type: ${resource.type}).`]
+    // KA763: `taskId` used to be forwarded raw (UUID only) and, for text
+    // files, ignored by the server. Resolve either spelling here.
+    const taskRef = params.task || params.taskId
+    const taskId = taskRef ? await resolveTaskId(taskRef, await resolveProject(params.projectId)) : undefined
+    const resource = await karea.uploadResource(params.name, params.data, params.mimeType, params.folder, taskId)
+    const parts = [`Uploaded "${resource.name}" (${resource.sizeBytes} bytes, ${resourceKind(resource)}).`]
+    const linkLine = linkedTaskLine(resource, taskRef)
+    if (linkLine) parts.push(linkLine)
     parts.push(...recordFooter('resource', { id: resource.id }))
     return { content: [{ type: 'text', text: parts.join('\n') }] }
   } catch (err: any) {
     return { content: [{ type: 'text', text: `Upload failed: ${err.message}` }] }
   }
 })
+
+// KA763: what an upload became, in words. A CSV is stored as an editable
+// text resource with its MIME kept, which a bare "type: text" hid.
+function resourceKind(r: { type?: string; mimeType?: string | null }): string {
+  const kind = r.type === 'text' ? 'text resource' : 'file'
+  return r.mimeType ? `${kind}, ${r.mimeType}` : kind
+}
+
+// KA763: say which task a create/upload linked to, by visual ID.
+function linkedTaskLine(r: { linkedTask?: { id: string; visualId?: string | null; title?: string } | null }, asked?: string): string | null {
+  if (!asked) return null
+  const t = r.linkedTask
+  if (!t) return `Not linked to ${asked}: the server did not confirm the link. Use karea_link_resource_to_task.`
+  return `Linked to ${t.visualId || t.title || t.id}.`
+}
 
 // Resolve a task identifier (UUID, visual ID, or name) to a UUID. Throws a
 // clear message if the visual ID can't be resolved - otherwise downstream
@@ -1300,12 +1394,15 @@ registerTool('karea_list_notes', 'List the notes (human-readable updates) on a t
 // KA510: sticky notes. Deliberately folded into the notes tools (karea_read / karea_notes_write) rather
 // than given a tool of their own - "notes" is what they are, and the surface
 // is scored on staying small.
-registerTool('karea_list_sticky_notes', 'List the user\'s sticky notes - the scratch pad: short reminders, commands, URLs. Not tasks: they have no status, assignee or deadline. Pass projectId to get that project\'s notes plus the global ones. Read-only.', {
-  projectId: z.string().optional().describe('Project name or ID. Returns that project\'s notes AND the global ones. Omit for every note.'),
-}, async ({ projectId }) => {
+registerTool('karea_list_sticky_notes', 'List the user\'s sticky notes - the scratch pad: short reminders, commands, URLs. Not tasks: they have no status, assignee or deadline. Requires a filter: projectId (that project\'s notes plus the global ones) or scope ("global" for notes in no project, "all" for every note). Read-only.', {
+  projectId: z.string().optional().describe('Project name or ID. Returns that project\'s notes AND the global ones.'),
+  scope: z.enum(['global', 'all']).optional().describe('"global" = only notes not filed under a project; "all" = every note in every project. Use instead of projectId.'),
+}, async ({ projectId, scope }) => {
+  const noFilter = requireFilter('karea_list_sticky_notes', { projectId, scope }, ['projectId', 'scope'])
+  if (noFilter) return noFilter
   const pid = projectId ? await resolveProject(projectId) : undefined
   const data = await karea.listStickyNotes(pid)
-  const notes = data.notes || []
+  const notes = (data.notes || []).filter((n: any) => pid || scope !== 'global' || !n.project)
   if (!notes.length) return { content: [{ type: 'text', text: 'No sticky notes.' }] }
   const lines = notes.map((n: any) => {
     const scope = n.project ? `project=${n.project.name}` : 'global'
@@ -1315,7 +1412,7 @@ registerTool('karea_list_sticky_notes', 'List the user\'s sticky notes - the scr
 })
 
 registerTool('karea_create_sticky_note', 'Pin a short note to the user\'s sticky board - a command, a URL, a couple of lines to remember. Use this for something with no lifecycle; if it needs doing, create a task instead. Returns the new note with its id.', {
-  content: z.string().describe('The body. Markdown works; `@resource` and bare task IDs like KA123 become links.'),
+  content: z.string().describe(`The body. Markdown works; bare task IDs like KA123 become links. ${MENTION_SYNTAX}`),
   title: z.string().optional().describe('Very short title (max 60 chars).'),
   color: z.enum(['amber', 'rose', 'violet', 'sky', 'emerald', 'slate']).optional().describe('Palette colour. Default amber.'),
   projectId: z.string().optional().describe('Project name or ID to scope the note to. Omit to make it global (shown everywhere).'),
@@ -1329,7 +1426,7 @@ registerTool('karea_create_sticky_note', 'Pin a short note to the user\'s sticky
 
 registerTool('karea_edit_sticky_note', 'Change a sticky note: its text, title, colour, pin state, or which project it belongs to. Only the fields you pass change.', {
   noteId: z.string().describe('Sticky note UUID (from karea_list_sticky_notes).'),
-  content: z.string().optional().describe('New body.'),
+  content: z.string().optional().describe(`New body. ${MENTION_SYNTAX}`),
   title: z.string().optional().describe('New title (max 60 chars).'),
   color: z.enum(['amber', 'rose', 'violet', 'sky', 'emerald', 'slate']).optional(),
   projectId: z.string().nullable().optional().describe('Project name or ID, or null to make the note global.'),
@@ -1400,7 +1497,7 @@ registerTool('karea_unlink_session', 'Remove a previously-linked AI session from
 registerTool('karea_add_note', 'Add a note to a task - or the same note to many tasks at once, via `tasks`. Notes are human-readable updates/observations (the user reads them). For private AI working memory that persists across sessions, use karea_set_context instead.', {
   task: z.string().optional().describe('Task name, visual ID (C1, T2), or UUID. Use this OR `tasks`.'),
   tasks: z.array(z.string()).min(1).max(50).optional().describe('KA540: several task identifiers, to put the SAME note on all of them (e.g. "shipped in build X"). Use this OR `task`. 1-50 items.'),
-  content: z.string().describe('Note content. Markdown is supported (lists, **bold**, `code`, links) - use it when it improves readability; plain text is also fine.'),
+  content: z.string().describe(`Note content. Markdown is supported (lists, **bold**, \`code\`, links) - use it when it improves readability; plain text is also fine. ${MENTION_SYNTAX}`),
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
 }, async (params) => {
@@ -1462,7 +1559,7 @@ registerTool('karea_add_note', 'Add a note to a task - or the same note to many 
 registerTool('karea_edit_note', 'Change the text of an existing note on a task, by note ID, and return the updated note.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   noteId: z.string().describe('Note UUID (from karea_list_notes)'),
-  content: z.string().describe('Updated note content. Markdown is supported (lists, **bold**, `code`, links); plain text is also fine.'),
+  content: z.string().describe(`Updated note content. Markdown is supported (lists, **bold**, \`code\`, links); plain text is also fine. ${MENTION_SYNTAX}`),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
   ...sessionLinkFields,
 }, async (params) => {
@@ -1503,8 +1600,8 @@ registerTool('karea_create_subtask', 'Create a subtask under a parent task. Acce
   title: z.string().describe('Subtask title'),
   category: z.string().optional().describe('Category name (defaults to the parent\'s category if omitted)'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
-  sla: z.string().optional().describe('Deadline: 2d, 5h, tomorrow, monday'),
-  description: z.string().optional().describe('Subtask description. Rendered as Markdown - use `**bold**`, lists, `code`, links, etc. Keep it short.'),
+  sla: z.string().optional().describe(SLA_FORMS),
+  description: z.string().optional().describe(`Subtask description. Rendered as Markdown - use \`**bold**\`, lists, \`code\`, links, etc. Keep it short. ${MENTION_SYNTAX}`),
   markdown: z.string().optional().describe('Long-form markdown content - investigation findings, technical/functional docs, solution design, root cause analysis.'),
   source: z.string().optional().describe('Where this subtask came from'),
   closingRequisites: z.array(z.string()).optional().describe('Requirements that must be met before closing. Keep each one short and concrete - 1 short sentence, ideally under ~120 chars (e.g. "Tests pass in CI", "PR approved"). Do NOT write paragraphs.'),
@@ -1696,28 +1793,31 @@ registerTool('karea_unlink_jira', 'Remove the JIRA link from a Karea task', {
 
 function formatReminderLine(r: any, tz = 'UTC'): string {
   const t = r.task || {}
-  // A reminder can be on a meeting instead of a task (KA692).
+  // A reminder can be on a meeting (KA692) or an open question (KA735) instead of a task.
   const display = r.meeting ? `meeting "${r.meeting.title}"`
+    : r.question ? `question ${typeof r.question.seq === 'number' ? `${r.question.project?.prefix ?? ''}Q${r.question.seq}` : `"${r.question.question}"`}`
     : t.project?.prefix && typeof t.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t.id || '').slice(0, 6)}`
   const when = r.fireAt
     ? new Date(r.fireAt).toLocaleString('en-GB', { timeZone: tz, day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '?'
-  const title = r.title || t.title || r.meeting?.title || 'Reminder'
+  const title = r.title || t.title || r.meeting?.title || r.question?.question || 'Reminder'
   const bits = [`[${r.id}] ${display} - ${title} · fires ${when} · status ${r.status}`]
   if (r.repeat) bits.push(`repeat ${r.repeat}`)
   if (r.emailOptIn) bits.push('email on')
   return bits.join(' · ')
 }
 
-registerTool('karea_check_reminders', 'Return the caller\'s upcoming and past-due reminders. Use this when the user asks "what reminders do I have?" or before doing focused work so you know what will interrupt them. Also useful to look up a reminder id for karea_snooze_reminder / karea_dismiss_reminder / karea_mark_reminder_done. Read-only.', {
+registerTool('karea_check_reminders', 'Return the caller\'s upcoming and past-due reminders. Use this when the user asks "what reminders do I have?" or before doing focused work so you know what will interrupt them. Also useful to look up a reminder id for karea_snooze_reminder / karea_dismiss_reminder / karea_mark_reminder_done. Needs no filter for pending reminders (a short list by nature); includeDone requires taskId. Read-only.', {
   taskId: z.string().optional().describe('Only list reminders on this task (visual ID, name, or UUID).'),
-  includeDone: z.boolean().optional().describe('Include dismissed / done / cancelled reminders too. Default false.'),
+  includeDone: z.boolean().optional().describe('Include dismissed / done / cancelled reminders too. Default false. Requires taskId, so past reminders are read one task at a time.'),
 }, async ({ taskId, includeDone }) => {
+  // KA741: pending reminders are few by nature and already ride every tool
+  // response, so they need no filter. The full history does.
+  if (includeDone && !taskId) return errorResult('karea_check_reminders with includeDone needs a taskId, so one call cannot return every past reminder. Pass taskId, or drop includeDone for the pending ones.')
   let tid: string | undefined = undefined
-  if (taskId) {
-    const t = await karea.getTask(taskId)
-    tid = t.id
-  }
+  // The task API only takes a UUID; a visual ID ("KA104") came back "Task
+  // not found" although the parameter says it accepts one.
+  if (taskId) tid = await resolveTaskId(taskId)
   const items = await karea.listReminders({ taskId: tid, includeDone: !!includeDone })
   if (items.length === 0) return { content: [{ type: 'text', text: 'No reminders.' }] }
   const rtz = await karea.getUserTimezone()
@@ -1725,13 +1825,17 @@ registerTool('karea_check_reminders', 'Return the caller\'s upcoming and past-du
   return { content: [{ type: 'text', text: lines.join('\n') }] }
 })
 
-registerTool('karea_create_reminder', 'Schedule a reminder on a task. The reminder fires with a full-screen in-app modal at fireAt (always on); optionally also emails the user. Title falls back to the task title when omitted.', {
-  task: z.string().describe('Task ref (visual ID, name, or UUID).'),
+registerTool('karea_create_reminder', 'Schedule a reminder on a task or on an open question (pass exactly one of task / question). The reminder fires with a full-screen in-app modal at fireAt (always on); optionally also emails the user. Title falls back to the task title (or the question text) when omitted.', {
+  task: z.string().optional().describe('Task ref (visual ID, name, or UUID). Give this or question.'),
+  question: z.string().optional().describe('Open question ref (short ID like "KAQ12", or UUID). Give this or task.'),
   fireAt: z.string().describe('When the reminder fires - ISO 8601 datetime (e.g. "2026-07-28T09:00:00Z") or a friendly form like "2d", "5h", "tomorrow 9am".'),
-  title: z.string().optional().describe('Optional title shown on the fire modal. Falls back to the task title.'),
+  title: z.string().optional().describe('Optional title shown on the fire modal. Falls back to the task title or the question text.'),
   emailOptIn: z.boolean().optional().describe('Also email the user when it fires. Default false (in-app only).'),
 }, async (params) => {
-  const t = await karea.getTask(params.task)
+  if (!!params.task === !!params.question) return errorResult('karea_create_reminder needs exactly one of task or question.')
+  // KA735: a reminder on an open question rather than a task.
+  const t = params.task ? await karea.getTask(params.task) : null
+  const q = params.question ? await karea.getQuestion(params.question) : null
   // Accept ISO OR delegate to the app's SLA parser via a shortcut task-edit trick:
   // easier: parse relative forms locally with a light heuristic; ISO passes through.
   let fireIso = params.fireAt
@@ -1754,12 +1858,13 @@ registerTool('karea_create_reminder', 'Schedule a reminder on a task. The remind
     }
   }
   const rem = await karea.createReminder({
-    taskId: t.id,
+    ...(q ? { questionId: q.id } : { taskId: t!.id }),
     title: params.title || null,
     fireAt: fireIso,
     emailOptIn: params.emailOptIn,
   })
-  return { content: [{ type: 'text', text: `Reminder set on "${t.title}".\n  ${formatReminderLine({ ...rem, task: t }, await karea.getUserTimezone())}` }] }
+  const on = q ? `question "${q.question}"` : `"${t!.title}"`
+  return { content: [{ type: 'text', text: `Reminder set on ${on}.\n  ${formatReminderLine(q ? { ...rem, question: q } : { ...rem, task: t }, await karea.getUserTimezone())}` }] }
 })
 
 registerTool('karea_snooze_reminder', 'Snooze a firing reminder by N minutes. The modal closes; the reminder re-fires after the snooze window.', {
@@ -1777,14 +1882,14 @@ registerTool('karea_dismiss_reminder', 'Dismiss a reminder - cancels it so it wi
   return { content: [{ type: 'text', text: `Reminder ${reminderId} dismissed.` }] }
 })
 
-registerTool('karea_mark_reminder_done', 'Fulfill a reminder: closes both the reminder AND the underlying task (status = done).', {
+registerTool('karea_mark_reminder_done', 'Fulfill a reminder: closes both the reminder AND the underlying task (status = done). A reminder on a meeting or an open question is just closed.', {
   reminderId: z.string().describe('Reminder id.'),
 }, async ({ reminderId }) => {
   const rem = await karea.patchReminder(reminderId, { action: 'done' })
   if (rem?.taskId) {
     try { await karea.sendCommand(`/ct ${rem.taskId}`) } catch {}
   }
-  return { content: [{ type: 'text', text: `Reminder ${reminderId} marked done + task closed.` }] }
+  return { content: [{ type: 'text', text: rem?.taskId ? `Reminder ${reminderId} marked done + task closed.` : `Reminder ${reminderId} marked done.` }] }
 })
 
 // ─── Meetings (KA465) ──────────────────────────────────────────────────────
@@ -1802,12 +1907,14 @@ function meetingLine(m: any): string {
   return `${when} - ${m.title}${proj}${where} (id: ${m.id})`
 }
 
-registerTool('karea_list_meetings', 'List meetings. Defaults to ALL meetings; narrow with scope="upcoming" (ends in the future) or scope="past", a from/to date window, or a project. Meetings belong to the user, not to a project - projectId only filters those explicitly filed under it. Read-only.', {
-  scope: z.enum(['upcoming', 'past']).optional().describe('"upcoming" = ends in the future, "past" = already ended. Omit for all.'),
+registerTool('karea_list_meetings', 'List meetings. Requires at least one filter: scope ("upcoming" = ends in the future, "past" = already ended), a from/to date window, or projectId (a call with none is refused). Meetings belong to the user, not to a project - projectId only filters those explicitly filed under it. Read-only.', {
+  scope: z.enum(['upcoming', 'past']).optional().describe('"upcoming" = ends in the future, "past" = already ended.'),
   from: z.string().optional().describe('Only meetings starting at/after this ISO datetime (e.g. "2026-09-14T00:00:00Z").'),
   to: z.string().optional().describe('Only meetings starting at/before this ISO datetime.'),
   projectId: z.string().optional().describe('Project name or ID to filter by.'),
 }, async (params) => {
+  const noFilter = requireFilter('karea_list_meetings', params, ['scope', 'from', 'to', 'projectId'])
+  if (noFilter) return noFilter
   const pid = params.projectId ? await resolveProject(params.projectId) : undefined
   const data = await karea.listMeetings({ scope: params.scope, from: params.from, to: params.to, projectId: pid })
   const meetings = data.meetings || []
@@ -1924,7 +2031,7 @@ registerTool('karea_delete_meeting', 'Delete a meeting permanently. Linked tasks
   return { content: [{ type: 'text', text: `Meeting ${meetingId} deleted. Linked tasks and questions were kept.` }] }
 })
 
-registerTool('karea_link_task_to_meeting', 'Link an EXISTING task to a meeting (discussed at / arising from it). Accepts a task name, visual ID (KA123) or UUID. Unlinking later keeps the task.', {
+registerTool('karea_link_task_to_meeting', 'Link an EXISTING task to a meeting (discussed at / arising from it). Accepts a task name, visual ID (KA123) or UUID. Only the task is linked: its open questions are not. Unlinking later keeps the task.', {
   meetingId: z.string().describe('Meeting UUID.'),
   task: z.string().describe('Task name, visual ID (KA123), or UUID.'),
   projectId: z.string().optional().describe('Project name or ID - helps resolve a visual ID.'),
@@ -1946,21 +2053,45 @@ registerTool('karea_unlink_task_from_meeting', 'Remove the link between a task a
   return { content: [{ type: 'text', text: `Unlinked task ${task} from meeting ${meetingId} (the task was kept).` }] }
 })
 
-registerTool('karea_link_question_to_meeting', 'Link an EXISTING open question to a meeting, so it is raised there. Use karea_list_questions to find the id. The question outlives the meeting.', {
+registerTool('karea_link_question_to_meeting', 'Link an EXISTING open question to a meeting, so it is raised there. The tasks linked to the question are linked to the meeting too (one way only: linking a task never brings its questions). Use karea_list_questions to find the id. The question outlives the meeting.', {
   meetingId: z.string().describe('Meeting UUID.'),
-  questionId: z.string().describe('Open question UUID (from karea_list_questions).'),
-}, async ({ meetingId, questionId }) => {
-  await karea.linkQuestionToMeeting(meetingId, questionId)
-  return { content: [{ type: 'text', text: `Linked question ${questionId} to meeting ${meetingId}.` }] }
+  questionId: z.string().describe('Open question short ID (e.g. KAQ3) or UUID, from karea_list_questions.'),
+}, async ({ meetingId, questionId: ref }) => {
+  const questionId = await resolveQuestionId(ref)
+  const res = await karea.linkQuestionToMeeting(meetingId, questionId) as { tasksLinked?: { id: string; title: string }[] } | undefined
+  const tasks = res?.tasksLinked ?? []
+  const also = tasks.length ? ` Its linked task${tasks.length > 1 ? 's were' : ' was'} linked to the meeting too: ${tasks.map((t) => `"${t.title}"`).join(', ')}.` : ''
+  return { content: [{ type: 'text', text: `Linked question ${ref} to meeting ${meetingId}.${also}` }] }
 })
 
 registerTool('karea_unlink_question_from_meeting', 'Remove the link between an open question and a meeting. The question itself is kept.', {
   meetingId: z.string().describe('Meeting UUID.'),
-  questionId: z.string().describe('Open question UUID.'),
-}, async ({ meetingId, questionId }) => {
+  questionId: z.string().describe('Open question short ID (e.g. KAQ3) or UUID.'),
+}, async ({ meetingId, questionId: ref }) => {
+  const questionId = await resolveQuestionId(ref)
   await karea.unlinkQuestionFromMeeting(meetingId, questionId)
-  return { content: [{ type: 'text', text: `Unlinked question ${questionId} from meeting ${meetingId} (the question was kept).` }] }
+  return { content: [{ type: 'text', text: `Unlinked question ${ref} from meeting ${meetingId} (the question was kept).` }] }
 })
+
+/**
+ * KA761: a question short ID ("JNQ24") -> its UUID. The meeting endpoints
+ * took only UUIDs ("Field reference is invalid"), while every other question
+ * action took either. The app now accepts both too; resolving here keeps an
+ * older app working with this client.
+ */
+const QUESTION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+async function resolveQuestionId(ref: string): Promise<string> {
+  const r = ref.trim()
+  if (QUESTION_UUID_RE.test(r)) return r
+  let q: any
+  try {
+    q = await karea.getQuestion(r)
+  } catch (err: any) {
+    throw new Error(`Question not found: ${r} (${err.message}). Pass its short ID (e.g. KAQ3) or UUID from karea_list_questions.`)
+  }
+  if (!q?.id) throw new Error(`Question not found: ${r}. Pass its short ID (e.g. KAQ3) or UUID from karea_list_questions.`)
+  return q.id
+}
 
 // ---------------------------------------------------------------------------
 // KA323: the advertised tool surface.
@@ -1975,7 +2106,7 @@ export const TOOL_GROUPS: { tool: string; summary: string; actions: string[] }[]
   {
     tool: 'karea_read',
     summary: 'Read anything in Karea without changing it: projects, tasks, subtasks, notes, sticky notes, task documents and AI context, open questions, resources, meetings, reminders, Jira links, AI sessions, and the activity recap. The main entry point - start here.',
-    actions: ['karea_list_projects', 'karea_list_tasks', 'karea_view_task', 'karea_view_tasks', 'karea_list_subtasks', 'karea_list_notes', 'karea_list_sticky_notes', 'karea_get_markdown', 'karea_get_context', 'karea_list_questions', 'karea_list_resources', 'karea_get_resource', 'karea_list_meetings', 'karea_view_meeting', 'karea_check_reminders', 'karea_get_jira_link', 'karea_list_sessions', 'karea_recap'],
+    actions: ['karea_list_projects', 'karea_list_tasks', 'karea_view_task', 'karea_view_tasks', 'karea_task_changes', 'karea_list_subtasks', 'karea_list_notes', 'karea_list_sticky_notes', 'karea_get_markdown', 'karea_get_context', 'karea_list_questions', 'karea_list_resources', 'karea_get_resource', 'karea_list_meetings', 'karea_view_meeting', 'karea_check_reminders', 'karea_get_jira_link', 'karea_list_sessions', 'karea_recap'],
   },
   {
     tool: 'karea_tasks_write',
@@ -2038,7 +2169,17 @@ function paramSignature(entry: ToolEntry): string {
  * any action when the model needs more than the signature.
  */
 export function groupDescription(group: { tool: string; summary: string; actions: string[] }): string {
-  const lines = [group.summary, '', 'Pass one of these as `action`, with its arguments in `params`:']
+  const present = group.actions.filter((a) => toolRegistry.has(a))
+  // KA761: a model composed `mcp__karea__karea_list_notes` from an action
+  // name, a tool that does not exist. The FIRST line of every description now
+  // names the actions and says, in so many words, how they are called.
+  const lines = [
+    `Actions of this tool: ${present.join(', ')}. These are actions, not tools: call ${group.tool} with action="${present[0]}" (or another name above) and its arguments in params; there is no tool named after an action.`,
+    '',
+    group.summary,
+    '',
+    'Pass one of these as `action`, with its arguments in `params`:',
+  ]
   for (const name of group.actions) {
     const entry = toolRegistry.get(name)
     if (!entry) continue
@@ -2053,6 +2194,143 @@ export function errorResult(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true as const }
 }
 
+// ---------------------------------------------------------------------------
+// KA761: one action router for both transports (stdio index.ts and the hosted
+// /api/mcp route), so a misrouted call gets the same answer everywhere.
+// ---------------------------------------------------------------------------
+
+/**
+ * The noun tools of v0.9.0, which old skills still name. Built from the nouns
+ * so scripts/check-references.mjs (which retires those names) stays clean.
+ */
+const OLD_NOUN_TOOLS = new Set(['tasks', 'subtasks', 'notes', 'docs', 'questions', 'resources', 'meetings', 'reminders', 'projects', 'integrations'].map((n) => `karea_${n}`))
+
+/** The group tool an action is called through, or null. */
+export function toolForAction(action: string): string | null {
+  return TOOL_GROUPS.find((g) => g.actions.includes(action))?.tool ?? null
+}
+
+/**
+ * "karea_list_notes", "list_notes" or "mcp__karea__karea_list_notes" -> the
+ * registered action name, or null. The `karea_` prefix stays the canonical
+ * form (no breaking change); the bare form is an alias.
+ */
+export function normalizeActionName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const name = raw.trim().split('__').pop()!.trim()
+  if (!name) return null
+  if (toolRegistry.has(name)) return name
+  const prefixed = `karea_${name.replace(/^karea_/, '')}`
+  return toolRegistry.has(prefixed) ? prefixed : null
+}
+
+function editDistance(a: string, b: string): number {
+  const dp = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    let prev = dp[0]
+    dp[0] = i
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = dp[j]
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1))
+      prev = tmp
+    }
+  }
+  return dp[b.length]
+}
+
+/** The closest action name to a typo, when it is close enough to be a guess worth making. */
+function closestAction(raw: string): string | null {
+  const name = `karea_${raw.trim().split('__').pop()!.replace(/^karea_/, '')}`
+  let best: string | null = null
+  let bestD = Infinity
+  for (const a of toolRegistry.keys()) {
+    const d = editDistance(name, a)
+    if (d < bestD) { bestD = d; best = a }
+  }
+  return best && bestD <= Math.max(3, Math.floor(name.length / 4)) ? best : null
+}
+
+/** Why `raw` is not an action, with the call to make instead. */
+function unknownActionMessage(raw: string, tool?: string): string {
+  const where = tool ? ` for ${tool}` : ''
+  const list = tool
+    ? `${tool} actions: ${(TOOL_GROUPS.find((g) => g.tool === tool)?.actions ?? []).join(', ')}.`
+    : 'Call karea_help with no action to list every action by tool.'
+  const bare = raw.trim().split('__').pop()!.trim()
+  if (!bare) return `Missing action${where}: pass an action name as action, with its arguments in params. ${list}`
+  if (OLD_NOUN_TOOLS.has(bare) || TOOL_GROUPS.some((g) => g.tool === bare) || bare === 'karea_help') {
+    return `"${raw}" is not a Karea action: it is (or was) a tool name. Pass an action name such as "karea_list_notes" as action. ${list}`
+  }
+  const guess = closestAction(raw)
+  const hint = guess ? ` Did you mean ${guess}? Call it through ${toolForAction(guess) ?? 'its tool'}: ${toolForAction(guess) ?? 'tool'} { action: "${guess}", params: {...} }.` : ''
+  return `Unknown action "${raw}"${where}.${hint} ${list}`
+}
+
+export type ActionRoute =
+  | { ok: true; action: string; entry: ToolEntry }
+  | { ok: false; message: string }
+
+/**
+ * Resolve the `action` a group tool was called with. An action that belongs
+ * to ANOTHER tool is refused with the right tool named, never run: running it
+ * would let a read-only tool write (or a write tool delete), which the
+ * annotations promise cannot happen.
+ */
+export function routeAction(tool: string, raw: unknown): ActionRoute {
+  const action = normalizeActionName(raw)
+  if (!action) return { ok: false, message: unknownActionMessage(String(raw ?? ''), tool) }
+  const owner = toolForAction(action)
+  const group = TOOL_GROUPS.find((g) => g.tool === tool)
+  if (group && !group.actions.includes(action)) {
+    return {
+      ok: false,
+      message: `${action} is an action of ${owner ?? 'another tool'}, not of ${tool}. Actions are not tools: call ${owner ?? 'that tool'} with action="${action}" and the same params.`,
+    }
+  }
+  return { ok: true, action, entry: toolRegistry.get(action)! }
+}
+
+/** The server-level instructions, sent at `initialize` by both transports. */
+export function serverInstructions(origin: string): string {
+  return `Karea task manager at ${origin}. Nine tools: karea_read for every read, karea_tasks_write / karea_notes_write / karea_meetings_write / karea_resources_write / karea_projects_write for changes by area, karea_delete, karea_assistant and karea_help. Each takes { action, params }. Actions are NOT tools: karea_list_notes is called as karea_read { action: "karea_list_notes", params: {...} }. Call karea_help with an action name for its parameters and the tool to call it through.`
+}
+
+export const HELP_TOOL_DESCRIPTION ='Return the full parameter list and description of any Karea action, and which tool to call it through. Read-only; changes nothing. Omit `action` to list every action grouped by tool. Actions are not tools: an action such as karea_list_notes is called as karea_read { action: "karea_list_notes", params: {...} }.'
+
+/** karea_help's answer, shared by both transports. */
+export function helpResult(raw?: string) {
+  if (!raw) {
+    const lines = ['Actions by tool (call the tool, pass the action name as action):']
+    for (const group of TOOL_GROUPS) {
+      const actions = group.actions.filter((a) => toolRegistry.has(a))
+      if (actions.length === 0) continue
+      lines.push(`${group.tool}: ${actions.join(', ')}`)
+    }
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] }
+  }
+  const action = normalizeActionName(raw)
+  const entry = action ? toolRegistry.get(action) : undefined
+  if (!action || !entry) return errorResult(unknownActionMessage(raw))
+  const params = Object.entries(entry.shape).map(([key, schema]) => ({
+    name: key,
+    required: !schema.isOptional(),
+    description: schema.description || '',
+  }))
+  const tool = toolForAction(action)
+  const text = [
+    `${action}${tool ? ` (call it through ${tool})` : ''}`,
+    ...(tool ? [`Call: ${tool} { action: "${action}", params: {...} }`] : []),
+    '',
+    entry.description,
+    '',
+    'Parameters:',
+    ...(params.length
+      ? params.map((p) => `- ${p.name}${p.required ? '' : ' (optional)'}: ${p.description}`)
+      : ['(none)']),
+  ].join('\n')
+  return { content: [{ type: 'text' as const, text }] }
+}
+
 
 // ---------------------------------------------------------------------------
 // Tool annotations (MCP directory review: title + readOnlyHint, plus
@@ -2060,7 +2338,7 @@ export function errorResult(text: string) {
 // ---------------------------------------------------------------------------
 
 /** Actions that only read. Everything else changes data. */
-const READ_ONLY_ACTION = /^karea_(list_|view_|get_|check_reminders$|recap$|help$)/
+const READ_ONLY_ACTION = /^karea_(list_|view_|get_|check_reminders$|recap$|help$|task_changes$)/
 
 /**
  * Actions that only ADD (create, attach, log, share). Not destructive: they

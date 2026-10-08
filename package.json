@@ -1,8 +1,8 @@
 {
   "name": "karea-mcp",
   "mcpName": "io.github.starecz/karea-mcp",
-  "version": "0.11.0",
-  "description": "MCP server for Karea task management - 9 tools covering 69 actions, for Claude Code, Cursor, and other MCP clients to create, edit, close, and recap your dev tasks",
+  "version": "0.12.0",
+  "description": "MCP server for Karea task management - 9 tools covering 70 actions, for Claude Code, Cursor, and other MCP clients to create, edit, close, and recap your dev tasks",
   "bin": {
     "karea-mcp": "dist/index.js"
   },
