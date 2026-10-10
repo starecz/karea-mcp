@@ -133,7 +133,9 @@ export async function resolveProjectId(nameOrId: string): Promise<string | undef
   const label = (p: any) => `${p.name}${p.prefix ? ` (${p.prefix})` : ''}`
   if (found.length === 1) return found[0].id
   if (found.length > 1) {
-    throw new Error(`"${wanted}" matches ${found.length} projects: ${found.map(label).join(', ')}. Pass the full name, the prefix or the id of one.`)
+    // KA780: a prefix is unique per owner only, so two projects can share it
+    // and only the id tells them apart.
+    throw new Error(`"${wanted}" matches ${found.length} projects: ${found.map((p: any) => `${label(p)} id ${p.id}`).join(', ')}. Pass the id of one.`)
   }
   const all = projects.map(label)
   throw new Error(`No project matches "${wanted}". Your projects: ${all.slice(0, 30).join(', ')}${all.length > 30 ? `, and ${all.length - 30} more` : ''}. Pass a name, prefix or id from this list (karea_list_projects shows them all).`)
@@ -226,8 +228,10 @@ export async function createQuestion(data: { projectId: string; question: string
 }
 
 /** KA735: one question, by UUID or short ID ("KAQ12"). */
-export async function getQuestion(ref: string) {
-  return request(`/api/questions/${encodeURIComponent(ref)}`)
+export async function getQuestion(ref: string, projectId?: string) {
+  // KA780: a short ID two reachable projects share needs the project to pick one.
+  const q = projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''
+  return request(`/api/questions/${encodeURIComponent(ref)}${q}`)
 }
 
 export async function updateQuestion(id: string, data: any) {
@@ -352,10 +356,10 @@ export async function unlinkAISession(taskId: string, sessionRowId: string) {
   })
 }
 
-export async function addNote(taskId: string, content: string, source = 'mcp') {
+export async function addNote(taskId: string, content: string, source = 'mcp', parentId?: string) {
   return request(`/api/tasks/${taskId}/notes`, {
     method: 'POST',
-    body: JSON.stringify({ content, source }),
+    body: JSON.stringify({ content, source, ...(parentId ? { parentId } : {}) }),
   })
 }
 

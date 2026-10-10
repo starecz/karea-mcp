@@ -296,7 +296,7 @@ registerTool('karea_list_tasks', 'List tasks in a project. Requires at least one
 
 // Create task
 registerTool('karea_create_task', 'Create a new task in a project and return it with its visual ID (e.g. KA42), status, priority and category. Defaults when omitted: status open, priority 3, the first category of the project. Use karea_quick_task to log something already finished, or karea_doing for work in progress.', {
-  name: z.string().describe('Task title'),
+  name: z.string().describe('Task title. Keep it under 50 characters (recommended, not enforced; hard limit 500) and put detail in description.'),
   category: z.string().optional().describe('Category name'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe(SLA_FORMS),
@@ -353,7 +353,7 @@ registerTool('karea_create_task', 'Create a new task in a project and return it 
 // Edit task
 registerTool('karea_edit_task', 'Update fields of an existing task (title, status, priority, deadline, category, description, tags, or add a note) located by visual ID, name or UUID. Only the fields you pass change; the rest are left untouched. To change the assignee use karea_edit_tasks with this one task. Returns the updated task.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
-  name: z.string().optional().describe('New task title (rename the task)'),
+  name: z.string().optional().describe('New task title (rename the task). Under 50 characters recommended; hard limit 500.'),
   priority: z.number().min(1).max(5).optional().describe('New priority'),
   status: z.string().optional().describe('New status: open, in_progress, blocked, review, done'),
   closeSubtasks: z.boolean().optional().describe('Only when the task has open subtasks: true closes them too, false closes only this task (they stay open). Without it such a close is refused and the reply lists the subtasks: ASK THE USER which they want, then call again with their answer.'),
@@ -615,7 +615,7 @@ registerTool('karea_delete_task', 'Permanently delete a task and its history. Ir
 
 // Quick task (did)
 registerTool('karea_quick_task', 'Log something you already finished as a done task (it shows up in Recap) and return it. Status is always done; relative-time params set when it happened. For in-progress work use karea_doing instead.', {
-  description: z.string().describe('What you did'),
+  description: z.string().describe('What you did - becomes the task title, so under 50 characters is best (hard limit 500).'),
   source: z.string().optional().describe('Where it happened'),
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
@@ -633,7 +633,7 @@ registerTool('karea_quick_task', 'Log something you already finished as a done t
 
 // Quick in-progress task (doing)
 registerTool('karea_doing', 'Create a task you are working on right now (status: in_progress)', {
-  description: z.string().describe('What you are doing'),
+  description: z.string().describe('What you are doing - becomes the task title, so under 50 characters is best (hard limit 500).'),
   category: z.string().optional().describe('Category name'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe(SLA_FORMS),
@@ -1124,8 +1124,9 @@ registerTool('karea_create_question', 'Create an open question (a decision or bl
 registerTool('karea_answer_question', 'Answer an open question, located by short ID or text match: sets its answer and flips its status to answered. Returns the updated question.', {
   questionId: z.string().describe('Question UUID or short ID (e.g. KAQ3)'),
   answer: z.string().describe('The answer'),
-}, async ({ questionId, answer }) => {
-  await karea.updateQuestion(questionId, { answer, status: 'answered' })
+  projectId: z.string().optional().describe('Project name or ID - only needed when two of your projects share the short ID\'s prefix.'),
+}, async ({ questionId, answer, projectId }) => {
+  await karea.updateQuestion(projectId ? await resolveQuestionId(questionId, projectId) : questionId, { answer, status: 'answered' })
   return { content: [{ type: 'text', text: 'Question answered.' }] }
 })
 
@@ -1138,17 +1139,19 @@ registerTool('karea_edit_question', 'Edit an open question: change its text, sta
   markdown: z.string().optional().describe('Update markdown body'),
   taskIdsAdd: z.array(z.string()).optional().describe('Task IDs to link'),
   taskIdsRemove: z.array(z.string()).optional().describe('Task IDs to unlink'),
+  projectId: z.string().optional().describe('Project name or ID - only needed when two of your projects share the short ID\'s prefix.'),
 }, async (params) => {
-  const { questionId, ...data } = params
-  await karea.updateQuestion(questionId, data)
+  const { questionId, projectId, ...data } = params
+  await karea.updateQuestion(projectId ? await resolveQuestionId(questionId, projectId) : questionId, data)
   return { content: [{ type: 'text', text: 'Question updated.' }] }
 })
 
 // Delete a question
 registerTool('karea_delete_question', 'Permanently delete an open question. Irreversible. To keep it but mark it resolved, set its status to cancelled via karea_edit_question instead.', {
   questionId: z.string().describe('Question UUID or short ID (e.g. KAQ3)'),
-}, async ({ questionId }) => {
-  await karea.deleteQuestion(questionId)
+  projectId: z.string().optional().describe('Project name or ID - only needed when two of your projects share the short ID\'s prefix.'),
+}, async ({ questionId, projectId }) => {
+  await karea.deleteQuestion(projectId ? await resolveQuestionId(questionId, projectId) : questionId)
   return { content: [{ type: 'text', text: 'Question deleted.' }] }
 })
 
@@ -1383,11 +1386,23 @@ registerTool('karea_list_notes', 'List the notes (human-readable updates) on a t
   const notes = taskData.notes || []
   if (!notes.length) return { content: [{ type: 'text', text: 'No notes on this task.' }] }
 
-  const lines = notes.map((n: any) => {
+  // KA775: replies sit under the note they answer, oldest first.
+  const line = (n: any, indent = '') => {
     const by = n.createdBy?.name || n.guestName || 'Unknown'
     const date = new Date(n.createdAt).toLocaleString()
-    return `[${date}] ${by}: ${n.content}\n  Note ID: ${n.id}`
-  })
+    return `${indent}[${date}] ${by}: ${n.content}\n${indent}  Note ID: ${n.id}`
+  }
+  const ids = new Set(notes.map((n: any) => n.id))
+  const replies = (id: string) => notes
+    .filter((n: any) => n.parentId === id)
+    .sort((a: any, b: any) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+  const lines = notes
+    .filter((n: any) => !n.parentId || !ids.has(n.parentId))
+    .map((n: any) => {
+      const thread = replies(n.id)
+      if (!thread.length) return line(n)
+      return [line(n), `  ${thread.length} ${thread.length === 1 ? 'reply' : 'replies'}:`, ...thread.map((r: any) => line(r, '    '))].join('\n')
+    })
   return { content: [{ type: 'text', text: lines.join('\n\n') }] }
 })
 
@@ -1499,6 +1514,7 @@ registerTool('karea_add_note', 'Add a note to a task - or the same note to many 
   tasks: z.array(z.string()).min(1).max(50).optional().describe('KA540: several task identifiers, to put the SAME note on all of them (e.g. "shipped in build X"). Use this OR `task`. 1-50 items.'),
   content: z.string().describe(`Note content. Markdown is supported (lists, **bold**, \`code\`, links) - use it when it improves readability; plain text is also fine. ${MENTION_SYNTAX}`),
   projectId: z.string().optional().describe('Project name or ID'),
+  replyTo: z.string().optional().describe('KA775: the Note ID to reply to (from karea_list_notes). The reply is threaded under that note; a reply to a reply joins the same thread. Only with `task`, not `tasks`.'),
   ...sessionLinkFields,
 }, async (params) => {
   // Exactly one of the two. Accepting neither would note nothing and silently
@@ -1508,6 +1524,7 @@ registerTool('karea_add_note', 'Add a note to a task - or the same note to many 
   if (params.tasks?.length && params.task) {
     return errorResult('Pass either `task` or `tasks`, not both.')
   }
+  if (params.replyTo && params.tasks?.length) return errorResult('`replyTo` answers one note on one task: use it with `task`, not `tasks`.')
 
   const pid = await resolveProject(params.projectId)
 
@@ -1515,7 +1532,7 @@ registerTool('karea_add_note', 'Add a note to a task - or the same note to many 
     const result: any = await karea.sendCommand(`/vt ${q(ref)}`, pid)
     const taskId = result.taskId || ref
     const taskData = await karea.getTask(taskId)
-    const note = await karea.addNote(taskData.id, params.content)
+    const note = await karea.addNote(taskData.id, params.content, 'mcp', params.replyTo)
     const linkNote = await maybeLinkSession(taskData.id, params)
     return { taskData, note, linkNote, displayId: result.displayId || taskData.displayId }
   }
@@ -1523,7 +1540,7 @@ registerTool('karea_add_note', 'Add a note to a task - or the same note to many 
   // Single: unchanged response, so every existing caller sees what it always did.
   if (targets.length === 1) {
     const { taskData, note, linkNote, displayId } = await addOne(targets[0])
-    const parts = [`Note added to "${taskData.title}".${linkNote || ''}`]
+    const parts = [`${params.replyTo ? 'Reply' : 'Note'} added to "${taskData.title}".${linkNote || ''}`]
     if (note?.id) parts.push(`Note ID: ${note.id}`)
     parts.push(...recordFooter('task', { id: taskData.id, displayId }))
     return { content: [{ type: 'text', text: parts.join('\n') }] }
@@ -1597,7 +1614,7 @@ registerTool('karea_delete_note', 'Permanently delete a note from a task, by not
 // (title + priority only) so behavior matches the legacy direct endpoint.
 registerTool('karea_create_subtask', 'Create a subtask under a parent task. Accepts the parent by visual ID (e.g. KPL77), name, or UUID. Supports the same params as karea_create_task.', {
   parent: z.string().describe('Parent task name, visual ID (KPL77, C1), or UUID'),
-  title: z.string().describe('Subtask title'),
+  title: z.string().describe('Subtask title. Under 50 characters recommended; hard limit 500.'),
   category: z.string().optional().describe('Category name (defaults to the parent\'s category if omitted)'),
   priority: z.number().min(1).max(5).optional().describe('Priority 1-5 (1=critical)'),
   sla: z.string().optional().describe(SLA_FORMS),
@@ -2056,8 +2073,9 @@ registerTool('karea_unlink_task_from_meeting', 'Remove the link between a task a
 registerTool('karea_link_question_to_meeting', 'Link an EXISTING open question to a meeting, so it is raised there. The tasks linked to the question are linked to the meeting too (one way only: linking a task never brings its questions). Use karea_list_questions to find the id. The question outlives the meeting.', {
   meetingId: z.string().describe('Meeting UUID.'),
   questionId: z.string().describe('Open question short ID (e.g. KAQ3) or UUID, from karea_list_questions.'),
-}, async ({ meetingId, questionId: ref }) => {
-  const questionId = await resolveQuestionId(ref)
+  projectId: z.string().optional().describe('Project name or ID - only needed when two of your projects share the short ID\'s prefix.'),
+}, async ({ meetingId, questionId: ref, projectId }) => {
+  const questionId = await resolveQuestionId(ref, projectId)
   const res = await karea.linkQuestionToMeeting(meetingId, questionId) as { tasksLinked?: { id: string; title: string }[] } | undefined
   const tasks = res?.tasksLinked ?? []
   const also = tasks.length ? ` Its linked task${tasks.length > 1 ? 's were' : ' was'} linked to the meeting too: ${tasks.map((t) => `"${t.title}"`).join(', ')}.` : ''
@@ -2067,8 +2085,9 @@ registerTool('karea_link_question_to_meeting', 'Link an EXISTING open question t
 registerTool('karea_unlink_question_from_meeting', 'Remove the link between an open question and a meeting. The question itself is kept.', {
   meetingId: z.string().describe('Meeting UUID.'),
   questionId: z.string().describe('Open question short ID (e.g. KAQ3) or UUID.'),
-}, async ({ meetingId, questionId: ref }) => {
-  const questionId = await resolveQuestionId(ref)
+  projectId: z.string().optional().describe('Project name or ID - only needed when two of your projects share the short ID\'s prefix.'),
+}, async ({ meetingId, questionId: ref, projectId }) => {
+  const questionId = await resolveQuestionId(ref, projectId)
   await karea.unlinkQuestionFromMeeting(meetingId, questionId)
   return { content: [{ type: 'text', text: `Unlinked question ${ref} from meeting ${meetingId} (the question was kept).` }] }
 })
@@ -2080,12 +2099,13 @@ registerTool('karea_unlink_question_from_meeting', 'Remove the link between an o
  * older app working with this client.
  */
 const QUESTION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-async function resolveQuestionId(ref: string): Promise<string> {
+async function resolveQuestionId(ref: string, projectId?: string): Promise<string> {
   const r = ref.trim()
   if (QUESTION_UUID_RE.test(r)) return r
   let q: any
   try {
-    q = await karea.getQuestion(r)
+    // KA780: the project picks between two of the caller's projects that share a prefix.
+    q = await karea.getQuestion(r, await resolveProject(projectId))
   } catch (err: any) {
     throw new Error(`Question not found: ${r} (${err.message}). Pass its short ID (e.g. KAQ3) or UUID from karea_list_questions.`)
   }
