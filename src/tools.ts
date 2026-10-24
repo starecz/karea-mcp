@@ -310,10 +310,21 @@ registerTool('karea_create_task', 'Create a new task in a project and return it 
   projectId: z.string().optional().describe('Project name or ID'),
   ...sessionLinkFields,
 }, async (params) => {
-  const pid = await resolveProject(params.projectId)
+  const asked = await resolveProject(params.projectId)
+  let parent: any = null
+  if (params.parentId) {
+    // KA761: a visual ID or name works here too, not only a UUID.
+    try {
+      parent = await parentTask(params.parentId, asked)
+    } catch (err: any) {
+      return errorResult(`Parent task not found: ${params.parentId}. No task was created.`)
+    }
+  }
+  const pid = asked ?? parent?.projectId
+  const category = params.category || (parent && parent.projectId === pid ? parent.category?.name : undefined)
 
   let cmd = `/nt -n ${q(params.name)}`
-  if (params.category) cmd += ` -cat ${q(params.category)}`
+  if (category) cmd += ` -cat ${q(category)}`
   if (params.priority) cmd += ` -prio ${params.priority}`
   if (params.sla) cmd += ` -sla ${q(params.sla)}`
   if (params.description) cmd += ` -d ${q(params.description)}`
@@ -326,9 +337,9 @@ registerTool('karea_create_task', 'Create a new task in a project and return it 
   const result = await karea.sendCommand(cmd, pid)
 
   if (result.taskId) {
-    if (params.parentId) {
-      // KA761: a visual ID or name works here too, not only a UUID.
-      await karea.updateTask(result.taskId, { parentId: await resolveTaskId(params.parentId, pid) })
+    if (parent) {
+      await karea.updateTask(result.taskId, { parentId: parent.id })
+      result.response = (result.response || 'Task created.') + `\nParent: ${parent.project?.prefix && parent.seq != null ? `${parent.project.prefix}${parent.seq} · ` : ''}"${parent.title}" (id: ${parent.id})`
     }
     if (params.markdown) {
       await karea.setMarkdown(result.taskId, params.markdown, pid)
@@ -658,13 +669,39 @@ registerTool('karea_doing', 'Create a task you are working on right now (status:
 // as the Claude Code sync mod, instead of re-reading the whole task.
 registerTool('karea_task_changes', 'Return only what changed on one task in the last sinceMinutes minutes (status, fields, notes with a short excerpt, Context entry titles, links...), each with who, how (user = browser, mcp = API/AI, jira, system) and when, newest first. The header has the task\'s status colour, review stage colour and exact last-changed time. Use the LOWEST window possible: 5 minutes recommended, and a poller should pass the minutes since its last check. An empty window returns one short line. Read-only.', {
   task: z.string().describe('Task name, visual ID (KA12) or UUID'),
-  sinceMinutes: z.number().int().min(1).max(60).describe('Required, 1 to 60. How many minutes back to look; use the smallest window you need (5 recommended).'),
+  sinceMinutes: z.number().int().min(1).max(2880).describe('Required, 1 to 2880 (48 hours). How many minutes back to look; use the smallest window you need (5 recommended).'),
   projectId: z.string().optional().describe('Project name or ID'),
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
   const result = await karea.sendCommand(`/changes ${q(params.task)} -since ${params.sinceMinutes}`, pid)
   return { content: [{ type: 'text', text: result.response || 'No answer.' }] }
 })
+
+/**
+ * KA850: a task's Context as text, with how many entries it holds. Context
+ * lives in titled entries; the old single aiContext field is only a fallback.
+ * Empty text means the task has no Context at all.
+ */
+function formatContext(data: any): { text: string; count: number } {
+  const entries = Array.isArray(data?.entries) ? data.entries : []
+  if (entries.length === 0) {
+    const legacy = typeof data?.context === 'string' ? data.context.trim() : ''
+    return legacy ? { text: `# Context: ${data.title}\n\n${legacy}`, count: 1 } : { text: '', count: 0 }
+  }
+  const parts = entries.map((e: any) =>
+    `## ${e.title}  [${e.lastEditedMode || e.createdMode}, updated ${e.updatedAt ? new Date(e.updatedAt).toISOString().slice(0, 16).replace('T', ' ') : '?'}${e.lastEditedBy ? ` by ${e.lastEditedBy}` : ''}]\n\n${e.content}`)
+  return { text: `# Context: ${data.title} (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})\n\n${parts.join('\n\n---\n\n')}`, count: entries.length }
+}
+
+/** KA850: the Context part of a task view: inlined, or a hint saying how many entries exist. */
+async function contextSection(task: string, pid: string | undefined, inline: boolean | undefined, legacy: string | null | undefined): Promise<string> {
+  let ctx = { text: '', count: 0 }
+  try { ctx = formatContext(await karea.getContext(task, pid)) } catch { if (legacy) ctx = { text: `AI Context:\n${legacy}`, count: 1 } }
+  if (ctx.count === 0) return ''
+  return inline
+    ? `\n\n${ctx.text}`
+    : `\n\nAI Context: ${ctx.count} entr${ctx.count === 1 ? 'y' : 'ies'} (your cross-session working memory). Read it with karea_get_context, or re-call with includeContext=true.`
+}
 
 registerTool('karea_view_task', 'Return one task with all its details (status, priority, deadline, recurrence, category, description, notes, requisites, links), located by visual ID, name or UUID. Pass includeContext=true to also inline the task\'s AI Context in the response - avoids a follow-up karea_get_context round-trip. Read-only.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
@@ -729,21 +766,7 @@ registerTool('karea_view_task', 'Return one task with all its details (status, p
       } catch {
         // ignore - links are supplementary
       }
-      if ((taskData as any).aiContext) {
-        if (params.includeContext) {
-          // Inline the context so the caller doesn't need a second round-trip.
-          try {
-            const ctx = await karea.getContext(params.task, pid)
-            const body = (ctx && ctx.context) ? ctx.context : (taskData as any).aiContext
-            response += `\n\nAI Context:\n${body}`
-          } catch {
-            // Fall back to the aiContext value we already have.
-            response += `\n\nAI Context:\n${(taskData as any).aiContext}`
-          }
-        } else {
-          response += `\n\nThis task has AI Context (your cross-session working memory). Fetch it with karea_get_context, or re-call karea_view_task with includeContext=true.`
-        }
-      }
+      response += await contextSection(params.task, pid, params.includeContext, (taskData as any).aiContext)
     } catch {
       // ignore - keep the original response
     }
@@ -785,19 +808,7 @@ registerTool('karea_view_tasks', 'Return details for MANY tasks in one response.
             })
             block += `\n\nLinked Resources (${links.length}):\n${lines.join('\n')}`
           }
-          if ((taskData as any).aiContext) {
-            if (params.includeContext) {
-              try {
-                const ctx = await karea.getContext(id, pid)
-                const body = (ctx && ctx.context) ? ctx.context : (taskData as any).aiContext
-                block += `\n\nAI Context:\n${body}`
-              } catch {
-                block += `\n\nAI Context:\n${(taskData as any).aiContext}`
-              }
-            } else {
-              block += `\n\n(AI Context available - re-call with includeContext=true to inline.)`
-            }
-          }
+          block += await contextSection(id, pid, params.includeContext, (taskData as any).aiContext)
           /**
            * KA540: the markdown doc, in bulk.
            *
@@ -1045,26 +1056,21 @@ registerTool('karea_get_context', 'Read the task\'s Context - titled entries of 
 }, async ({ task, projectId }) => {
   const pid = await resolveProject(projectId)
   const data = await karea.getContext(task, pid)
-  const entries = Array.isArray(data.entries) ? data.entries : []
-  if (entries.length === 0) {
-    return { content: [{ type: 'text', text: `# Context: ${data.title}\n\n${data.context || '(empty - write your plan/findings here with karea_set_context)'}` }] }
-  }
-  const parts = entries.map((e: any) =>
-    `## ${e.title}  [${e.lastEditedMode || e.createdMode}, updated ${e.updatedAt ? new Date(e.updatedAt).toISOString().slice(0, 16).replace('T', ' ') : '?'}${e.lastEditedBy ? ` by ${e.lastEditedBy}` : ''}]\n\n${e.content}`)
-  return { content: [{ type: 'text', text: `# Context: ${data.title} (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})\n\n${parts.join('\n\n---\n\n')}` }] }
+  return { content: [{ type: 'text', text: formatContext(data).text || `# Context: ${data.title}\n\n(empty - write your plan/findings here with karea_set_context)` }] }
 })
 
 // Write task Context - upserts a titled entry of the AI scratchpad.
 registerTool('karea_set_context', 'Write a titled entry of the task\'s Context - the AI-facing cross-session working memory. Context tracks the FULL HISTORY of a task, not just its current state: what was tried, what worked, what failed, what was decided and why. Update incrementally so the journey is preserved (never overwrite the whole entry with "current status" - read first with karea_get_context, append/refine, then write back). Context is your DEFAULT save target: after every plan, finding, decision, or gotcha, persist it here proactively under titles like "Plan", "Findings", "Decisions", "Gotchas", "Attempted". Upserts by title: same title overwrites THAT entry only; other entries are untouched. Pass empty context to delete the entry. Use karea_add_note only for human-facing updates and karea_set_markdown for long-form docs - but keep Context up to date either way.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
   context: z.string().describe('The full content for this entry. Pass empty string to delete the entry.'),
-  title: z.string().optional().describe('Entry title (e.g. "Plan", "Findings", "Decisions"). Defaults to "General".'),
+  title: z.string().optional().describe('Entry title naming the TOPIC, never a date (e.g. "Plan", "Findings", "Decisions", "Progress", "Loose ends"). Dates go inside the content. Append to an existing entry on the same topic instead of creating a sibling. Defaults to "General".'),
+  allowSimilarTitle: z.boolean().optional().describe('Only when a new entry really must sit beside an existing one on the same topic: without it, a title like "Decisions 2026-10-21" next to "Decisions" is refused.'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
   ...sessionLinkFields,
 }, async (params) => {
   const { task, context, title, projectId } = params
   const pid = await resolveProject(projectId)
-  const data = await karea.setContext(task, context, pid, title)
+  const data = await karea.setContext(task, context, pid, title, params.allowSimilarTitle)
   const linkNote = await maybeLinkSession(data.id || task, params)
   if (data.deleted) {
     return { content: [{ type: 'text', text: `Deleted Context entry "${data.entryTitle}" on "${data.title}".${linkNote || ''}` }] }
@@ -1074,14 +1080,17 @@ registerTool('karea_set_context', 'Write a titled entry of the task\'s Context -
 })
 
 // List open questions
-registerTool('karea_list_questions', 'List open questions (unresolved decisions or blockers), newest first. Requires at least one filter: projectId or status (a call with neither is refused). Status open, answered, cancelled or all; with only a projectId every status is returned. Read-only.', {
+registerTool('karea_list_questions', 'List open questions (unresolved decisions or blockers), newest first. Requires at least one filter: projectId, status, task or search (a call with none is refused). Filters combine. Status open, answered, cancelled or all; without a status every status is returned. Read-only.', {
   projectId: z.string().optional().describe('Project name or ID. Counts as a filter.'),
   status: z.string().optional().describe('Filter by status: open, answered, cancelled, all. Counts as a filter; with status alone, questions from every project are returned.'),
-}, async ({ projectId, status }) => {
-  const noFilter = requireFilter('karea_list_questions', { projectId, status }, ['projectId', 'status'])
+  task: z.string().optional().describe('Only questions linked to this task (visual ID like KA12, name or UUID). Counts as a filter.'),
+  search: z.string().optional().describe('Words to find in the question or its answer, or a short ID (KAQ5). Counts as a filter.'),
+}, async ({ projectId, status, task, search }) => {
+  const noFilter = requireFilter('karea_list_questions', { projectId, status, task, search }, ['projectId', 'status', 'task', 'search'])
   if (noFilter) return noFilter
   const pid = await resolveProject(projectId)
-  const data = await karea.listQuestions(pid, status)
+  const taskId = task ? await resolveTaskId(task, pid) : undefined
+  const data = await karea.listQuestions({ projectId: pid, status, taskId, search })
   if (!data.length) return { content: [{ type: 'text', text: 'No questions found.' }] }
 
   const lines = data.map((q: any) => {
@@ -1156,7 +1165,7 @@ registerTool('karea_delete_question', 'Permanently delete an open question. Irre
 })
 
 // List resources
-registerTool('karea_list_resources', 'List resources (text notes & files). Requires at least one filter: projectId, query, folder, type, mime, minSize or maxSize (a call with none is refused). With a projectId it returns every resource belonging to that project - whether assigned to it directly, linked to one of its tasks, or filed under a folder named after the project (e.g. knowledge-base docs). Without projectId the other filters search all your resources, including unfiled ones. All filters combine freely (name query, folder, type, mime, size range).', {
+registerTool('karea_list_resources', 'List resources (text notes & files). Requires at least one filter: projectId, task, query, folder, type, mime, minSize or maxSize (a call with none is refused). With a projectId it returns every resource belonging to that project - whether assigned to it directly, linked to one of its tasks, or filed under a folder named after the project (e.g. knowledge-base docs). Without projectId the other filters search all your resources, including unfiled ones. All filters combine freely (name query, folder, type, mime, size range).', {
   projectId: z.string().optional().describe('Project name or ID. Without it, the other filters search ALL your resources (including unfiled / knowledge-base items not tied to any task).'),
   query: z.string().optional().describe('Fuzzy match against resource name.'),
   folder: z.string().optional().describe('Exact folder path (case-insensitive) - e.g. "docs/api".'),
@@ -1164,11 +1173,13 @@ registerTool('karea_list_resources', 'List resources (text notes & files). Requi
   mime: z.string().optional().describe('Substring match against MIME type - e.g. "pdf", "image/png", "video".'),
   minSize: z.number().int().optional().describe('Minimum size in bytes.'),
   maxSize: z.number().int().optional().describe('Maximum size in bytes.'),
-}, async ({ projectId, query, folder, type, mime, minSize, maxSize }) => {
-  const noFilter = requireFilter('karea_list_resources', { projectId, query, folder, type, mime, minSize, maxSize }, ['projectId', 'query', 'folder', 'type', 'mime', 'minSize', 'maxSize'])
+  task: z.string().optional().describe('Only resources linked to this task (visual ID like KA12, name or UUID).'),
+}, async ({ projectId, query, folder, type, mime, minSize, maxSize, task }) => {
+  const noFilter = requireFilter('karea_list_resources', { projectId, query, folder, type, mime, minSize, maxSize, task }, ['projectId', 'task', 'query', 'folder', 'type', 'mime', 'minSize', 'maxSize'])
   if (noFilter) return noFilter
   const pid = await resolveProject(projectId)
-  const resources = await karea.listResources({ projectId: pid, query, folder, type, mime, minSize, maxSize })
+  const taskId = task ? await resolveTaskId(task, pid) : undefined
+  const resources = await karea.listResources({ projectId: pid, query, folder, type, mime, minSize, maxSize, taskId })
   if (!resources.length) return { content: [{ type: 'text', text: 'No resources found.' }] }
 
   const lines = resources.map((r: any) => {
@@ -1283,9 +1294,11 @@ registerTool('karea_delete_resource', 'Permanently delete a resource (text or fi
 })
 
 // Upload a file resource (base64-encoded)
-registerTool('karea_upload_resource', 'Upload a file as a resource (base64-encoded) and return it with its ID. Include a file extension in the name (e.g. "spec.pdf", "notes.md"): when mimeType is omitted the type is taken from the extension, so "spec.pdf" previews as a PDF and "notes.md" is stored as Markdown text. Without an extension (or with one Karea does not know) and no mimeType, the file is stored as an opaque binary (application/octet-stream) with no format and no preview. Text formats (CSV, Markdown, JSON...) are stored as editable text resources, binaries as files. Pass `task` to link the upload to a task in the same call (it also goes into that task\'s folder, Tasks/<prefix>/<ID>, unless you set one); a folder alone does not link.', {
-  name: z.string().describe('File name with extension (e.g. "spec.pdf", "notes.md"). The extension sets the type when mimeType is omitted; without one the file has no format.'),
-  data: z.string().describe('Base64-encoded file content'),
+registerTool('karea_upload_resource', 'Upload a file as a resource and return it with its ID. Three ways to send it: `path` (local karea-mcp only: the file is read from disk and sent as is, up to your plan\'s file size, the way to upload anything bigger than a few hundred KB), `data` (base64 in the call: small files only), or `link: true` (returns a 15-minute upload URL and a curl command to run yourself; use it with the hosted connector for big files). Include a file extension in the name (e.g. "spec.pdf", "notes.md"): when mimeType is omitted the type is taken from the extension, so "spec.pdf" previews as a PDF and "notes.md" is stored as Markdown text. Without an extension (or with one Karea does not know) and no mimeType, the file is stored as an opaque binary (application/octet-stream) with no format and no preview. Text formats (CSV, Markdown, JSON...) are stored as editable text resources, binaries as files. Pass `task` to link the upload to a task in the same call (it also goes into that task\'s folder, Tasks/<prefix>/<ID>, unless you set one); a folder alone does not link.', {
+  name: z.string().optional().describe('File name with extension (e.g. "spec.pdf", "notes.md"). The extension sets the type when mimeType is omitted; without one the file has no format. Required with `data`; with `path` it defaults to the file\'s own name.'),
+  path: z.string().optional().describe('Absolute path of a local file to upload (local karea-mcp only, not the hosted connector). Preferred for anything but tiny files.'),
+  data: z.string().optional().describe('Base64-encoded file content, for small files only'),
+  link: z.boolean().optional().describe('true: do not upload now, return an upload URL valid for 15 minutes and the curl command that uploads a file to it'),
   mimeType: z.string().optional().describe('MIME type (e.g. application/pdf). If omitted it is taken from the name\'s extension; an unknown or missing extension falls back to application/octet-stream. The content itself is never inspected.'),
   folder: z.string().optional().describe('Folder path to organize the resource'),
   task: z.string().optional().describe('Task to link the uploaded resource to: visual ID (HR380), UUID or name. Linked in the same call.'),
@@ -1293,11 +1306,27 @@ registerTool('karea_upload_resource', 'Upload a file as a resource (base64-encod
   projectId: z.string().optional().describe('Project name or ID (helps resolve a visual ID or name in `task`)'),
 }, async (params) => {
   try {
+    if ([params.path, params.data, params.link].filter(Boolean).length !== 1) return { content: [{ type: 'text', text: 'Upload failed: pass exactly one of `path` (a local file), `data` (base64, small files) or `link: true` (an upload URL for curl).' }] }
     // KA763: `taskId` used to be forwarded raw (UUID only) and, for text
     // files, ignored by the server. Resolve either spelling here.
     const taskRef = params.task || params.taskId
     const taskId = taskRef ? await resolveTaskId(taskRef, await resolveProject(params.projectId)) : undefined
-    const resource = await karea.uploadResource(params.name, params.data, params.mimeType, params.folder, taskId)
+    if (params.link) {
+      const l: any = await karea.createUploadLink(taskId, params.folder)
+      return { content: [{ type: 'text', text: [`Upload link (valid until ${l.expiresAt}): ${l.url}`, `Run: ${l.curl}`, 'The file keeps its own name; the response is the new resource.'].join('\n') }] }
+    }
+    let resource: any
+    if (params.path) {
+      if (karea.isHosted()) return { content: [{ type: 'text', text: 'Upload failed: `path` only works with the local karea-mcp, which can read your disk. With the hosted connector use `link: true` and run the curl command it returns.' }] }
+      const { readFile, stat } = await import('fs/promises')
+      const { basename } = await import('path')
+      const st = await stat(params.path).catch(() => null)
+      if (!st?.isFile()) return { content: [{ type: 'text', text: `Upload failed: no file at ${params.path}` }] }
+      resource = await karea.uploadResourceFile(params.name || basename(params.path), await readFile(params.path), params.mimeType, params.folder, taskId)
+    } else {
+      if (!params.name) return { content: [{ type: 'text', text: 'Upload failed: `name` is required with `data`.' }] }
+      resource = await karea.uploadResource(params.name, params.data!, params.mimeType, params.folder, taskId)
+    }
     const parts = [`Uploaded "${resource.name}" (${resource.sizeBytes} bytes, ${resourceKind(resource)}).`]
     const linkLine = linkedTaskLine(resource, taskRef)
     if (linkLine) parts.push(linkLine)
@@ -1328,6 +1357,11 @@ function linkedTaskLine(r: { linkedTask?: { id: string; visualId?: string | null
 // callers would forward the raw string as a taskId and the server's Zod
 // `.uuid()` check would bubble up as a generic 500.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+// KA1006: the parent of a new subtask, so it is created in the parent's project (and category) unless told otherwise.
+async function parentTask(ref: string, projectId?: string): Promise<any> {
+  return karea.getTask(await resolveTaskId(ref, projectId))
+}
+
 async function resolveTaskId(task: string, projectId?: string): Promise<string> {
   if (UUID_RE.test(task)) return task
   let result: any
@@ -1627,16 +1661,18 @@ registerTool('karea_create_subtask', 'Create a subtask under a parent task. Acce
   projectId: z.string().optional().describe('Project name or ID (needed if parent is a visual ID)'),
   ...sessionLinkFields,
 }, async (params) => {
-  const pid = await resolveProject(params.projectId)
+  const asked = await resolveProject(params.projectId)
 
   // Resolve parent (accept visualId / name / UUID)
-  const lookup = await karea.sendCommand(`/vt ${q(params.parent)}`, pid)
-  const parentUuid = lookup.taskId
-  if (!parentUuid) {
-    return { content: [{ type: 'text', text: `Parent task not found: ${params.parent}` }] }
+  let parentData: any
+  try {
+    parentData = await parentTask(params.parent, asked)
+  } catch {
+    return errorResult(`Parent task not found: ${params.parent}`)
   }
-  const parentData = await karea.getTask(parentUuid)
-  const parentCategoryName = parentData.category?.name as string | undefined
+  // KA1006: in the parent's project unless one is named, with its category when it is the same project.
+  const pid = asked ?? parentData.projectId
+  const parentCategoryName = parentData.projectId === pid ? parentData.category?.name as string | undefined : undefined
 
   // Build /nt command identical to karea_create_task so the same flag set works.
   let cmd = `/nt -n ${q(params.title)}`
@@ -1924,16 +1960,19 @@ function meetingLine(m: any): string {
   return `${when} - ${m.title}${proj}${where} (id: ${m.id})`
 }
 
-registerTool('karea_list_meetings', 'List meetings. Requires at least one filter: scope ("upcoming" = ends in the future, "past" = already ended), a from/to date window, or projectId (a call with none is refused). Meetings belong to the user, not to a project - projectId only filters those explicitly filed under it. Read-only.', {
+registerTool('karea_list_meetings', 'List meetings. Requires at least one filter: scope ("upcoming" = ends in the future, "past" = already ended), a from/to date window, projectId, task or search (a call with none is refused). Filters combine. Meetings belong to the user, not to a project - projectId only filters those explicitly filed under it. Read-only.', {
   scope: z.enum(['upcoming', 'past']).optional().describe('"upcoming" = ends in the future, "past" = already ended.'),
   from: z.string().optional().describe('Only meetings starting at/after this ISO datetime (e.g. "2026-09-14T00:00:00Z").'),
   to: z.string().optional().describe('Only meetings starting at/before this ISO datetime.'),
   projectId: z.string().optional().describe('Project name or ID to filter by.'),
+  task: z.string().optional().describe('Only meetings linked to this task (visual ID like KA12, name or UUID).'),
+  search: z.string().optional().describe('Words to find in the meeting title, location or attendees.'),
 }, async (params) => {
-  const noFilter = requireFilter('karea_list_meetings', params, ['scope', 'from', 'to', 'projectId'])
+  const noFilter = requireFilter('karea_list_meetings', params, ['scope', 'from', 'to', 'projectId', 'task', 'search'])
   if (noFilter) return noFilter
   const pid = params.projectId ? await resolveProject(params.projectId) : undefined
-  const data = await karea.listMeetings({ scope: params.scope, from: params.from, to: params.to, projectId: pid })
+  const taskId = params.task ? await resolveTaskId(params.task, pid) : undefined
+  const data = await karea.listMeetings({ scope: params.scope, from: params.from, to: params.to, projectId: pid, taskId, search: params.search })
   const meetings = data.meetings || []
   if (meetings.length === 0) return { content: [{ type: 'text', text: 'No meetings found.' }] }
   const lines = meetings.map((m: any) => {

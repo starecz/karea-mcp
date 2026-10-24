@@ -18,6 +18,9 @@ import { AsyncLocalStorage } from 'async_hooks'
 export interface KareaCallContext { baseUrl: string; apiKey: string }
 const callContext = new AsyncLocalStorage<KareaCallContext>()
 
+/** KA954: true inside the hosted server, where the caller's files are not on this disk. */
+export const isHosted = () => !!callContext.getStore()
+
 /** Run `fn` with these credentials. Everything it awaits inherits them. */
 export function withKareaContext<T>(ctx: KareaCallContext, fn: () => Promise<T>): Promise<T> {
   return callContext.run(ctx, fn)
@@ -30,7 +33,7 @@ async function request(path: string, options: RequestInit = {}) {
   const res = await fetch(`${baseUrl}${path}`, {
     ...options,
     headers: {
-      'Content-Type': 'application/json',
+      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       'Authorization': `Bearer ${apiKey}`,
       ...options.headers,
     },
@@ -209,17 +212,19 @@ export async function getContext(task: string, projectId?: string) {
   return request(`/api/tasks/context?${params}`)
 }
 
-export async function setContext(task: string, context: string, projectId?: string, title?: string) {
+export async function setContext(task: string, context: string, projectId?: string, title?: string, allowSimilarTitle?: boolean) {
   return request('/api/tasks/context', {
     method: 'PUT',
-    body: JSON.stringify({ task, context, projectId, title }),
+    body: JSON.stringify({ task, context, projectId, title, allowSimilarTitle }),
   })
 }
 
-export async function listQuestions(projectId?: string, status?: string) {
+export async function listQuestions(opts: { projectId?: string; status?: string; taskId?: string; search?: string } = {}) {
   const params = new URLSearchParams()
-  if (projectId) params.set('projectId', projectId)
-  if (status) params.set('status', status)
+  if (opts.projectId) params.set('projectId', opts.projectId)
+  if (opts.status) params.set('status', opts.status)
+  if (opts.taskId) params.set('taskId', opts.taskId)
+  if (opts.search) params.set('q', opts.search)
   return request(`/api/questions?${params}`)
 }
 
@@ -242,9 +247,10 @@ export async function deleteQuestion(id: string) {
   return request(`/api/questions/${id}`, { method: 'DELETE' })
 }
 
-export async function listResources(opts: { projectId?: string; query?: string; folder?: string; type?: string; mime?: string; minSize?: number; maxSize?: number } = {}) {
+export async function listResources(opts: { projectId?: string; query?: string; folder?: string; type?: string; mime?: string; minSize?: number; maxSize?: number; taskId?: string } = {}) {
   const params = new URLSearchParams()
   if (opts.projectId) params.set('projectId', opts.projectId)
+  if (opts.taskId) params.set('taskId', opts.taskId)
   if (opts.query) params.set('q', opts.query)
   if (opts.folder) params.set('folder', opts.folder)
   if (opts.type) params.set('type', opts.type)
@@ -407,6 +413,20 @@ export async function uploadResource(name: string, data: string, mimeType?: stri
   })
 }
 
+/** KA954: a file sent as multipart (local MCP, read from disk): no base64 in the tool call, up to the plan's file size. */
+export async function uploadResourceFile(name: string, bytes: Uint8Array, mimeType?: string, folder?: string, taskId?: string) {
+  const form = new FormData()
+  form.append('file', new Blob([new Uint8Array(bytes)], mimeType ? { type: mimeType } : {}), name)
+  if (folder) form.append('folder', folder)
+  if (taskId) form.append('taskId', taskId)
+  return request('/api/resources/upload', { method: 'POST', body: form })
+}
+
+/** KA954: a 15-minute upload link, for a file the server cannot read itself. */
+export async function createUploadLink(taskId?: string, folder?: string) {
+  return request('/api/resources/upload-link', { method: 'POST', body: JSON.stringify({ taskId, folder }) })
+}
+
 export async function getJiraLink(taskId: string) {
   return request(`/api/tasks/${taskId}/jira-link`)
 }
@@ -450,12 +470,16 @@ export async function listMeetings(filters: {
   to?: string
   projectId?: string
   scope?: 'upcoming' | 'past'
+  taskId?: string
+  search?: string
 } = {}) {
   const params = new URLSearchParams()
   if (filters.from) params.set('from', filters.from)
   if (filters.to) params.set('to', filters.to)
   if (filters.projectId) params.set('projectId', filters.projectId)
   if (filters.scope) params.set('scope', filters.scope)
+  if (filters.taskId) params.set('taskId', filters.taskId)
+  if (filters.search) params.set('q', filters.search)
   const qs = params.toString()
   return request(`/api/meetings${qs ? `?${qs}` : ''}`)
 }

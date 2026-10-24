@@ -76,13 +76,13 @@ Reads go through `karea_read`; changes through `karea_tasks_write` (documents an
 |---|---|
 | `karea_list_tasks` | List tasks in a project. Needs at least one filter: `projectId`, `status` (open, in_progress, blocked, review, backlog, done, cancelled, all; comma-separated works), `closedSince`, `category`, `priority`, `assignee` or `search`. Without a `status` it returns the open ones (everything but done and cancelled), capped at 200; for closed work pass `status: "done"` plus `closedSince` (`7d`, `24h`). |
 | `karea_view_task` | Full detail of one task (resolves UUID, `HA123`, `C1`, or exact title). Output also includes any linked resources with their IDs. Pass `includeContext: true` to inline the task's AI Context (avoids a follow-up `karea_get_context` round-trip); when omitted, the response hints that Context exists. |
-| `karea_view_tasks` | Same as `karea_view_task` but batched: pass an array of task refs (visual IDs, names, or UUIDs) and get one consolidated response with a block per task. Max 50 per call. Prefer this over calling `karea_view_task` N times when inspecting a batch. |
-| `karea_create_task` | New task. Flags: `name`, `category`, `priority`, `sla` (`2d`/`5h`/`tomorrow`), `description` (rendered as Markdown -- use `**bold**`, lists, `code`, links), `source`, `closingRequisites`, `tags`, `markdown`, `jiraIssueKey`, `parentId` (visual ID, name or UUID). For subtasks, prefer `karea_create_subtask`. |
+| `karea_view_tasks` | Same as `karea_view_task` but batched: pass an array of task refs (visual IDs, names, or UUIDs) and get one consolidated response with a block per task. Max 50 per call. `includeContext: true` and `includeMarkdown: true` inline each task's AI Context and document. Prefer this over calling `karea_view_task` N times when inspecting a batch. |
+| `karea_create_task` | New task. Flags: `name` (keep it under 50 characters: recommended, not enforced; hard limit 500), `category`, `priority`, `sla` (`2d`/`5h`/`tomorrow`), `description` (rendered as Markdown -- use `**bold**`, lists, `code`, links), `source`, `closingRequisites`, `tags`, `markdown`, `jiraIssueKey`, `parentId` (visual ID, name or UUID). For subtasks, prefer `karea_create_subtask`. |
 | `karea_create_subtask` | Create a subtask under a parent. Takes `parent` (visual ID like `KPL77`, name, or UUID) plus the same flags as `karea_create_task`. Inherits the parent's category by default. |
 | `karea_list_subtasks` | List subtasks of a parent task. Accepts `parent` as visual ID, name, or UUID. |
 | `karea_edit_task` | Edit any field of a task: `name` (rename), `priority`, `status`, `reviewStage`, `sla`, `description` (Markdown), `markdown`, `category`, `tags` (with `clearTags` to replace), `closingRequisites` (with `clearClosingRequisites`), `jiraIssueKey` (set to `"unlink"` to remove), or `note` to append a note. |
 | `karea_edit_tasks` | **The same change applied to many tasks, in ONE request**: `tasks` (array of refs) plus any of `status`, `priority`, `category`, `sla`, `assignee`, `note`. Returns a per-task result; an unresolvable ref is reported without costing the rest. Up to 5000 per call. Use this instead of looping `karea_edit_task` -- looping is N calls against a 60/min limiter to express one intention. |
-| `karea_close_task` | Close a task; optional `resolution`. If closing requisites are still open it reports them instead of closing; tell the user, and only pass `confirm: true` if they want it closed anyway. |
+| `karea_close_task` | Close a task; optional `resolution`. If closing requisites are still open it reports them instead of closing; tell the user, and only pass `confirm: true` if they want it closed anyway. If the task has open subtasks the close is refused and the subtasks are listed: ask the user, then call again with `closeSubtasks: true` (close them too) or `false` (only this task). |
 | `karea_delete_task` | Delete; requires `confirm: true`. |
 | `karea_doing` | Create a task already in `in_progress` status. |
 | `karea_done` | **Close many tasks at once** (array of refs), in one request. Use this rather than calling `karea_close_task` N times; `karea_close_task` is for a single task where the closing-requisite check matters. |
@@ -100,10 +100,10 @@ Reads go through `karea_read`; changes through `karea_notes_write`; deletes thro
 
 | Action | Use for |
 |---|---|
-| `karea_add_note` | Add a note to a task. |
+| `karea_add_note` | Add a note to a task. Pass `replyTo` (a note ID) to reply to that note; replies are threaded under it. |
 | `karea_edit_note` | Edit an existing note's content. |
 | `karea_delete_note` | Delete a note from a task. |
-| `karea_list_notes` | List all notes on a task. |
+| `karea_list_notes` | List all notes on a task, with replies indented under the note they answer. |
 
 ### Questions
 
@@ -126,7 +126,7 @@ Reads go through `karea_read`; changes through `karea_resources_write`; deletes 
 | Action | Use for |
 |---|---|
 | `karea_create_resource` | Create a text resource. Accepts `name`, `content`, optional `folder`. Put a file extension in the name (`notes.md`, `data.csv`): it is the resource's only format, so `.md` renders as Markdown and `.csv` as a table, and a name without one is plain text with no format. |
-| `karea_upload_resource` | Upload a file as a resource (base64-encoded). Accepts `name`, `data` (base64), optional `mimeType`, `folder`, and `taskId` to auto-link the resource to a task on upload. Give the name an extension (`spec.pdf`, `notes.md`): without `mimeType` the type is taken from it. With no extension (or an unknown one) and no `mimeType` the file is stored as `application/octet-stream`, with no format and no preview. |
+| `karea_upload_resource` | Upload a file as a resource. Pass exactly one of: `path` (local karea-mcp only: the file is read from disk, up to your plan's file size; use it for anything bigger than a few hundred KB), `data` (base64, small files only) or `link: true` (returns a 15-minute upload URL and the `curl` command to run; use it with the hosted connector, which cannot read your disk). Optional `name` (defaults to the file's own name with `path`), `mimeType`, `folder`, and `task` to link it to a task on upload. Give the name an extension (`spec.pdf`, `notes.md`): without `mimeType` the type is taken from it. With no extension (or an unknown one) the file is stored as `application/octet-stream`, with no format and no preview. |
 | `karea_get_resource` | Get a resource's full metadata + content by UUID. Text comes back inline, images as an image you can look at, other files (PDF, docs) as base64 with their MIME type; above 8 MB you get metadata and a download URL instead. |
 | `karea_update_resource` | Update a resource. Editable: `name`, `content` (text resources only), `folder`. `content` **replaces** the text, it does not append: read it first with `karea_get_resource` if you are adding to it. A rename should keep the extension, or the resource loses its format. |
 | `karea_delete_resource` | Delete a resource (needs the resource UUID). |
@@ -289,7 +289,7 @@ When you report back to the user, **include the Link** so they can click straigh
 - **Status values**: `open`, `in_progress` ("Doing"), `blocked`, `review`, `backlog`, `done`, `cancelled`. When the user says "doing" they mean `in_progress`; when they say "review" they mean `review`.
 - **Priority**: `1` = critical, `5` = minor. Default is `3`.
 - **SLA shortcuts** (user's timezone): `2d`, `5h`, `30m`, `1w`, `today` (18:00), `tomorrow` / `monday` (09:00), a day with a time (`today 13:30`, `tomorrow 9:00`, `friday at 17:00`), a time alone (`13:30`), or a date (`2026-10-20 13:30`).
-- **Projects** (`projectId`): a UUID, the exact name, the prefix (`KA`), one part of a `/` name (`Harrier` for `Statista/Harrier`), or a unique piece of the name. Several matches or none is an error that lists the candidates: pick one and retry, never guess.
+- **Projects** (`projectId`): a UUID, the exact name, the prefix (`KA`), one part of a `/` name (`Mobile` for `Acme/Mobile`), or a unique piece of the name. Several matches or none is an error that lists the candidates: pick one and retry, never guess.
 - **Review stages**: a task in `review` also carries a **stage** saying who is holding it -- by default `Developer review`, `Peer review`, `Client review`, and each project can define its own. Set it with `reviewStage` on `karea_edit_task`; passing one moves the task into Review if it is not there already. Moving a task into `review` without naming a stage gives it the project's first stage, whichever way the change is made (edit, bulk edit, chat, app); moving it out clears the stage. Projects can turn the feature off, in which case `reviewStage` is rejected. `karea_view_task` shows it as `review: peer review`.
 
 ## Bulk first
@@ -322,6 +322,7 @@ Context tracks the **full history** of a task -- what was tried, decided, discov
 - After a **decision** (approach chosen, trade-off accepted) -> read + append to the `Decisions` entry with the reasoning.
 - Hit a **gotcha** worth remembering -> read + append to `Gotchas`.
 - After trying and abandoning an approach -> read + append to `Attempted` so the next session doesn't retry it.
+- **Titles name the topic, never a date.** Use `Plan`, `Findings`, `Decisions`, `Progress`, `Gotchas`, `Attempted`, `Loose ends`, `Scope`. Dates go inside the entry (a `### 2026-10-21` header or a dated bullet), not in the title. Before writing, look at the existing titles (`karea_get_context`) and append to the matching entry instead of creating a sibling like `Decisions 2026-10-21 follow-up`. Split only when an entry gets too big or mixes clearly different audiences, with topic sub-names (`Tech decisions`, `Business decisions`). Dated titles only when the user asks or the content is a true log (e.g. per release). `karea_set_context` warns when a new title looks like an existing one: merge into that entry.
 - **Read first with `karea_get_context`, refine, write back.** Do NOT overwrite an entry with the current status -- that erases the reasoning that got you here. Same title = same entry, but its content grows as the task evolves.
 - Notes, markdown, and description are still used when the user asks for them or the content is human-facing -- but Context gets updated **as well**, always.
 
