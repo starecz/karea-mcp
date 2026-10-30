@@ -26,10 +26,26 @@ export function withKareaContext<T>(ctx: KareaCallContext, fn: () => Promise<T>)
   return callContext.run(ctx, fn)
 }
 
+/**
+ * KA1023: an id from the model goes into a URL. Encoded, it cannot add a
+ * query string or a path segment; `.` and `..` are refused because they stay
+ * the same encoded and the URL parser would climb to another endpoint
+ * (`../account/delete`).
+ */
+function seg(v: unknown): string {
+  const s = String(v)
+  if (s === '.' || s === '..' || s === '') throw new Error(`Invalid id: "${s}"`)
+  return encodeURIComponent(s)
+}
+
 async function request(path: string, options: RequestInit = {}) {
   const ctx = callContext.getStore()
   const baseUrl = ctx?.baseUrl || KAREA_URL
   const apiKey = ctx?.apiKey || KAREA_API_KEY
+  // KA1023: and in case a path is built without seg(): the URL must reach the
+  // path that was written, not one the parser normalised it into.
+  const rawPath = path.split('?')[0]
+  if (new URL(path, 'http://x').pathname !== rawPath) throw new Error('Invalid id in request path.')
   const res = await fetch(`${baseUrl}${path}`, {
     ...options,
     headers: {
@@ -64,7 +80,8 @@ const PROJECTS_TTL_MS = 30_000
 // next caller within the TTL.
 const projectsCache = new Map<string, { at: number; value: any[] }>()
 
-function cacheKey(): string {
+/** Who is calling: one entry per credential in any per-user cache. */
+export function cacheKey(): string {
   const ctx = callContext.getStore()
   return `${ctx?.baseUrl || KAREA_URL}|${ctx?.apiKey || KAREA_API_KEY}`
 }
@@ -175,11 +192,11 @@ export async function getRecap(projectId?: string, hours = 24) {
 }
 
 export async function getTask(taskId: string) {
-  return request(`/api/tasks/${taskId}`)
+  return request(`/api/tasks/${seg(taskId)}`)
 }
 
 export async function updateTask(taskId: string, data: Record<string, unknown>) {
-  return request(`/api/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify(data) })
+  return request(`/api/tasks/${seg(taskId)}`, { method: 'PATCH', body: JSON.stringify(data) })
 }
 
 /**
@@ -240,11 +257,11 @@ export async function getQuestion(ref: string, projectId?: string) {
 }
 
 export async function updateQuestion(id: string, data: any) {
-  return request(`/api/questions/${id}`, { method: 'PATCH', body: JSON.stringify(data) })
+  return request(`/api/questions/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(data) })
 }
 
 export async function deleteQuestion(id: string) {
-  return request(`/api/questions/${id}`, { method: 'DELETE' })
+  return request(`/api/questions/${seg(id)}`, { method: 'DELETE' })
 }
 
 export async function listResources(opts: { projectId?: string; query?: string; folder?: string; type?: string; mime?: string; minSize?: number; maxSize?: number; taskId?: string } = {}) {
@@ -262,7 +279,7 @@ export async function listResources(opts: { projectId?: string; query?: string; 
 }
 
 export async function getResource(id: string) {
-  return request(`/api/resources/${id}`)
+  return request(`/api/resources/${seg(id)}`)
 }
 
 // Download the raw bytes of a file resource as a base64 string plus its
@@ -273,7 +290,7 @@ export async function downloadResourceBytes(id: string): Promise<{ base64: strin
   // it has to read the per-call context itself or it would keep using the
   // process-wide key on the hosted server.
   const ctx = callContext.getStore()
-  const res = await fetch(`${ctx?.baseUrl || KAREA_URL}/api/resources/${id}?inline=1`, {
+  const res = await fetch(`${ctx?.baseUrl || KAREA_URL}/api/resources/${seg(id)}?inline=1`, {
     headers: { 'Authorization': `Bearer ${ctx?.apiKey || KAREA_API_KEY}` },
   })
   if (!res.ok) {
@@ -296,31 +313,31 @@ export async function createTextResource(data: { name: string; content: string; 
 }
 
 export async function updateResource(id: string, data: { name?: string; content?: string; folder?: string | null; projectId?: string | null }) {
-  return request(`/api/resources/${id}`, {
+  return request(`/api/resources/${seg(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(data),
   })
 }
 
 export async function deleteResource(id: string) {
-  return request(`/api/resources/${id}`, { method: 'DELETE' })
+  return request(`/api/resources/${seg(id)}`, { method: 'DELETE' })
 }
 
 export async function linkResourceToTask(resourceId: string, taskId: string) {
-  return request(`/api/resources/${resourceId}/link`, {
+  return request(`/api/resources/${seg(resourceId)}/link`, {
     method: 'POST',
     body: JSON.stringify({ taskId }),
   })
 }
 
 export async function unlinkResourceFromTask(resourceId: string, taskId: string) {
-  return request(`/api/resources/${resourceId}/link?taskId=${taskId}`, {
+  return request(`/api/resources/${seg(resourceId)}/link?taskId=${seg(taskId)}`, {
     method: 'DELETE',
   })
 }
 
 export async function listNotes(taskId: string) {
-  return request(`/api/tasks/${taskId}/notes`)
+  return request(`/api/tasks/${seg(taskId)}/notes`)
 }
 
 // KA422 reminders
@@ -339,71 +356,71 @@ export async function createReminder(payload: { taskId?: string; questionId?: st
   return request('/api/reminders', { method: 'POST', body: JSON.stringify(payload) })
 }
 export async function patchReminder(id: string, payload: Record<string, unknown>) {
-  return request(`/api/reminders/${id}`, { method: 'PATCH', body: JSON.stringify(payload) })
+  return request(`/api/reminders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(payload) })
 }
 export async function deleteReminder(id: string) {
-  return request(`/api/reminders/${id}`, { method: 'DELETE' })
+  return request(`/api/reminders/${seg(id)}`, { method: 'DELETE' })
 }
 
 export async function listAISessions(taskId: string) {
-  return request(`/api/tasks/${taskId}/ai-sessions`)
+  return request(`/api/tasks/${seg(taskId)}/ai-sessions`)
 }
 
 export async function linkAISession(taskId: string, data: { provider: string; sessionId: string; label?: string }) {
-  return request(`/api/tasks/${taskId}/ai-sessions`, {
+  return request(`/api/tasks/${seg(taskId)}/ai-sessions`, {
     method: 'POST',
     body: JSON.stringify(data),
   })
 }
 
 export async function unlinkAISession(taskId: string, sessionRowId: string) {
-  return request(`/api/tasks/${taskId}/ai-sessions?sessionRowId=${sessionRowId}`, {
+  return request(`/api/tasks/${seg(taskId)}/ai-sessions?sessionRowId=${seg(sessionRowId)}`, {
     method: 'DELETE',
   })
 }
 
 export async function addNote(taskId: string, content: string, source = 'mcp', parentId?: string) {
-  return request(`/api/tasks/${taskId}/notes`, {
+  return request(`/api/tasks/${seg(taskId)}/notes`, {
     method: 'POST',
     body: JSON.stringify({ content, source, ...(parentId ? { parentId } : {}) }),
   })
 }
 
 export async function updateNote(taskId: string, noteId: string, content: string) {
-  return request(`/api/tasks/${taskId}/notes/${noteId}`, { method: 'PATCH', body: JSON.stringify({ content }) })
+  return request(`/api/tasks/${seg(taskId)}/notes/${seg(noteId)}`, { method: 'PATCH', body: JSON.stringify({ content }) })
 }
 
 export async function deleteNote(taskId: string, noteId: string) {
-  return request(`/api/tasks/${taskId}/notes/${noteId}`, { method: 'DELETE' })
+  return request(`/api/tasks/${seg(taskId)}/notes/${seg(noteId)}`, { method: 'DELETE' })
 }
 
 export async function listSubtasks(taskId: string) {
-  return request(`/api/tasks/${taskId}/subtasks`)
+  return request(`/api/tasks/${seg(taskId)}/subtasks`)
 }
 
 export async function createSubtask(taskId: string, data: { title: string; priority?: number }) {
-  return request(`/api/tasks/${taskId}/subtasks`, {
+  return request(`/api/tasks/${seg(taskId)}/subtasks`, {
     method: 'POST',
     body: JSON.stringify(data),
   })
 }
 
 export async function addRequisite(taskId: string, description: string) {
-  return request(`/api/tasks/${taskId}/requisites`, {
+  return request(`/api/tasks/${seg(taskId)}/requisites`, {
     method: 'POST',
     body: JSON.stringify({ description }),
   })
 }
 
 export async function toggleRequisite(taskId: string, requisiteId: string, completed: boolean) {
-  return request(`/api/tasks/${taskId}/requisites`, {
+  return request(`/api/tasks/${seg(taskId)}/requisites`, {
     method: 'PATCH',
     body: JSON.stringify({ requisiteId, completed }),
   })
 }
 
 export async function deleteRequisite(taskId: string, requisiteId: string) {
-  return request(`/api/tasks/${taskId}/requisites?requisiteId=${requisiteId}`, { method: 'DELETE' })
+  return request(`/api/tasks/${seg(taskId)}/requisites?requisiteId=${seg(requisiteId)}`, { method: 'DELETE' })
 }
 
 export async function uploadResource(name: string, data: string, mimeType?: string, folder?: string, taskId?: string) {
@@ -428,36 +445,36 @@ export async function createUploadLink(taskId?: string, folder?: string) {
 }
 
 export async function getJiraLink(taskId: string) {
-  return request(`/api/tasks/${taskId}/jira-link`)
+  return request(`/api/tasks/${seg(taskId)}/jira-link`)
 }
 
 export async function linkJira(taskId: string, issueKey: string) {
-  return request(`/api/tasks/${taskId}/jira-link`, {
+  return request(`/api/tasks/${seg(taskId)}/jira-link`, {
     method: 'POST',
     body: JSON.stringify({ issueKey }),
   })
 }
 
 export async function unlinkJira(taskId: string) {
-  return request(`/api/tasks/${taskId}/jira-link`, { method: 'DELETE' })
+  return request(`/api/tasks/${seg(taskId)}/jira-link`, { method: 'DELETE' })
 }
 
 // Task-to-task links. GET returns both directions: `outgoing` (this task is the
 // source) and `incoming` (this task is the target), each with the link's own id
 // which is what DELETE needs.
 export async function getTaskLinks(taskId: string) {
-  return request(`/api/tasks/${taskId}/links`)
+  return request(`/api/tasks/${seg(taskId)}/links`)
 }
 
 export async function linkTask(taskId: string, targetTaskId: string, linkType = 'related') {
-  return request(`/api/tasks/${taskId}/links`, {
+  return request(`/api/tasks/${seg(taskId)}/links`, {
     method: 'POST',
     body: JSON.stringify({ targetTaskId, linkType }),
   })
 }
 
 export async function unlinkTask(taskId: string, linkId: string) {
-  return request(`/api/tasks/${taskId}/links?linkId=${encodeURIComponent(linkId)}`, { method: 'DELETE' })
+  return request(`/api/tasks/${seg(taskId)}/links?linkId=${encodeURIComponent(linkId)}`, { method: 'DELETE' })
 }
 
 // ─── Meetings (KA465) ──────────────────────────────────────────────────────
@@ -485,7 +502,7 @@ export async function listMeetings(filters: {
 }
 
 export async function getMeeting(meetingId: string) {
-  return request(`/api/meetings/${meetingId}`)
+  return request(`/api/meetings/${seg(meetingId)}`)
 }
 
 export async function createMeeting(data: Record<string, unknown>) {
@@ -493,43 +510,43 @@ export async function createMeeting(data: Record<string, unknown>) {
 }
 
 export async function updateMeeting(meetingId: string, data: Record<string, unknown>) {
-  return request(`/api/meetings/${meetingId}`, { method: 'PATCH', body: JSON.stringify(data) })
+  return request(`/api/meetings/${seg(meetingId)}`, { method: 'PATCH', body: JSON.stringify(data) })
 }
 
 export async function deleteMeeting(meetingId: string) {
-  return request(`/api/meetings/${meetingId}`, { method: 'DELETE' })
+  return request(`/api/meetings/${seg(meetingId)}`, { method: 'DELETE' })
 }
 
 export async function getMeetingTasks(meetingId: string) {
-  return request(`/api/meetings/${meetingId}/tasks`)
+  return request(`/api/meetings/${seg(meetingId)}/tasks`)
 }
 
 export async function linkTaskToMeeting(meetingId: string, taskId: string) {
-  return request(`/api/meetings/${meetingId}/tasks`, {
+  return request(`/api/meetings/${seg(meetingId)}/tasks`, {
     method: 'POST',
     body: JSON.stringify({ taskId }),
   })
 }
 
 export async function unlinkTaskFromMeeting(meetingId: string, taskId: string) {
-  return request(`/api/meetings/${meetingId}/tasks?taskId=${encodeURIComponent(taskId)}`, { method: 'DELETE' })
+  return request(`/api/meetings/${seg(meetingId)}/tasks?taskId=${encodeURIComponent(taskId)}`, { method: 'DELETE' })
 }
 
 export async function linkQuestionToMeeting(meetingId: string, questionId: string) {
-  return request(`/api/meetings/${meetingId}/questions`, {
+  return request(`/api/meetings/${seg(meetingId)}/questions`, {
     method: 'POST',
     body: JSON.stringify({ questionId }),
   })
 }
 
 export async function unlinkQuestionFromMeeting(meetingId: string, questionId: string) {
-  return request(`/api/meetings/${meetingId}/questions?questionId=${encodeURIComponent(questionId)}`, { method: 'DELETE' })
+  return request(`/api/meetings/${seg(meetingId)}/questions?questionId=${encodeURIComponent(questionId)}`, { method: 'DELETE' })
 }
 
 // The meeting side of a task: /api/tasks/[id] does NOT include meetings, so
 // karea_view_task has to ask for them separately.
 export async function getTaskMeetings(taskId: string) {
-  return request(`/api/tasks/${taskId}/meetings`)
+  return request(`/api/tasks/${seg(taskId)}/meetings`)
 }
 
 // KA510: sticky notes. The scratch layer - no status, no deadline, nothing to
@@ -547,11 +564,11 @@ export async function createStickyNote(body: {
 }
 
 export async function editStickyNote(id: string, body: Record<string, unknown>) {
-  return request(`/api/sticky-notes/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+  return request(`/api/sticky-notes/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
 }
 
 export async function deleteStickyNote(id: string) {
-  return request(`/api/sticky-notes/${id}`, { method: 'DELETE' })
+  return request(`/api/sticky-notes/${seg(id)}`, { method: 'DELETE' })
 }
 
 /**

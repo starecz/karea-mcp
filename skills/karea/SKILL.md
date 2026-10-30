@@ -77,6 +77,7 @@ Reads go through `karea_read`; changes through `karea_tasks_write` (documents an
 | `karea_list_tasks` | List tasks in a project. Needs at least one filter: `projectId`, `status` (open, in_progress, blocked, review, backlog, done, cancelled, all; comma-separated works), `closedSince`, `category`, `priority`, `assignee` or `search`. Without a `status` it returns the open ones (everything but done and cancelled), capped at 200; for closed work pass `status: "done"` plus `closedSince` (`7d`, `24h`). |
 | `karea_view_task` | Full detail of one task (resolves UUID, `HA123`, `C1`, or exact title). Output also includes any linked resources with their IDs. Pass `includeContext: true` to inline the task's AI Context (avoids a follow-up `karea_get_context` round-trip); when omitted, the response hints that Context exists. |
 | `karea_view_tasks` | Same as `karea_view_task` but batched: pass an array of task refs (visual IDs, names, or UUIDs) and get one consolidated response with a block per task. Max 50 per call. `includeContext: true` and `includeMarkdown: true` inline each task's AI Context and document. Prefer this over calling `karea_view_task` N times when inspecting a batch. |
+| `karea_task_changes` | What changed on ONE task in the last `sinceMinutes` minutes (1 to 2880, i.e. up to 48 hours): status, fields, notes (short excerpt), Context entry titles, links, each with who, how (`user` = browser, `mcp` = API/AI, `jira`, `system`) and when, newest first. Use the smallest window you need (5 is typical; a poller passes the minutes since its last check). Cheaper than re-reading the whole task. |
 | `karea_create_task` | New task. Flags: `name` (keep it under 50 characters: recommended, not enforced; hard limit 500), `category`, `priority`, `sla` (`2d`/`5h`/`tomorrow`), `description` (rendered as Markdown -- use `**bold**`, lists, `code`, links), `source`, `closingRequisites`, `tags`, `markdown`, `jiraIssueKey`, `parentId` (visual ID, name or UUID). For subtasks, prefer `karea_create_subtask`. |
 | `karea_create_subtask` | Create a subtask under a parent. Takes `parent` (visual ID like `KPL77`, name, or UUID) plus the same flags as `karea_create_task`. Inherits the parent's category by default. |
 | `karea_list_subtasks` | List subtasks of a parent task. Accepts `parent` as visual ID, name, or UUID. |
@@ -88,7 +89,7 @@ Reads go through `karea_read`; changes through `karea_tasks_write` (documents an
 | `karea_done` | **Close many tasks at once** (array of refs), in one request. Use this rather than calling `karea_close_task` N times; `karea_close_task` is for a single task where the closing-requisite check matters. |
 | `karea_quick_task` | "I just did this" log entry (`/did`). |
 | `karea_get_markdown` / `karea_set_markdown` | Read/write the long-form markdown doc on a task -- **use this to persist investigation notes**. |
-| `karea_get_context` / `karea_set_context` | Read/write the task's **Context** -- titled entries of AI working memory that hold the **full history** of a task (what was tried, decided, discovered, abandoned) across sessions (e.g. `Plan`, `Findings`, `Decisions`, `Gotchas`, `Attempted`). `karea_set_context` upserts by `title` (default `General`); empty content deletes the entry. Read FIRST when picking a task up, then update **incrementally** -- never overwrite with just the current status. Distinct from notes (human-readable) and markdown (long-form docs). |
+| `karea_get_context` / `karea_set_context` | Read/write the task's **Context** -- titled entries of AI working memory that hold the **full history** of a task (what was tried, decided, discovered, abandoned) across sessions (e.g. `Plan`, `Findings`, `Decisions`, `Gotchas`, `Attempted`). `karea_set_context` upserts by `title` (default `General`); empty content deletes the entry. The title names the topic, never a date: a near-copy of an existing title (`Decisions 2026-10-21` beside `Decisions`) is refused unless you pass `allowSimilarTitle: true`; append to the existing entry instead. Read FIRST when picking a task up, then update **incrementally** -- never overwrite with just the current status. Distinct from notes (human-readable) and markdown (long-form docs). |
 | `karea_add_requisite` | Add a closing requisite (checklist item before task can close). |
 | `karea_toggle_requisite` | Mark a closing requisite as done or undone. |
 | `karea_delete_requisite` | Delete a closing requisite. |
@@ -113,10 +114,10 @@ Reads go through `karea_read`; changes through `karea_meetings_write`; deletes t
 | Action | Use for |
 |---|---|
 | `karea_create_question` | Create an open question on a project. Accepts an optional `markdown` body (long-form context) and `taskIds` to pre-link tasks (visual IDs or UUIDs). |
-| `karea_edit_question` | Update a question. Editable: `question`, `answer`, `status` (`open` / `answered` / `cancelled`), `markdown`. Link tasks with `taskIdsAdd`, unlink with `taskIdsRemove`. |
+| `karea_edit_question` | Update a question. Editable: `question`, `answer`, `status` (`open` / `answered` / `cancelled`), `markdown`. Link tasks with `taskIdsAdd`, unlink with `taskIdsRemove` (visual IDs like `KA12` or UUIDs). |
 | `karea_answer_question` | Answer a question (also flips status to `answered`). Accepts the question's short ID (e.g. `KAQ3`) or UUID. |
 | `karea_edit_question` / `karea_delete_question` | Edit or delete a question by its short ID (e.g. `KAQ3`) or UUID. |
-| `karea_list_questions` | List questions. Needs `projectId` or `status` (`open`, `answered`, `cancelled`, or `all`). Each question has a static short ID (`<prefix>Q<seq>`, e.g. `KAQ3`) you can reference from anywhere. |
+| `karea_list_questions` | List questions. Needs at least one filter: `projectId`, `status` (`open`, `answered`, `cancelled`, or `all`), `task` (a task's visual ID or UUID) or `search`; filters combine. Each question has a static short ID (`<prefix>Q<seq>`, e.g. `KAQ3`) you can reference from anywhere. |
 
 ### Resources
 
@@ -146,7 +147,7 @@ Reminders on a task, a meeting or an open question. When a reminder fires, Karea
 | Action | Use for |
 |---|---|
 | `karea_check_reminders` | List the caller's pending reminders (no filter needed). Optional `taskId` filter; `includeDone` needs `taskId`. Useful before doing focused work so you know what will interrupt. |
-| `karea_create_reminder` | Schedule a reminder on a task (`task`) or an open question (`question`, e.g. `KAQ12`); pass exactly one. `fireAt` accepts ISO datetime or friendly forms like `2h`, `3d`, `tomorrow 9am`. Optional `title` (falls back to the task title or the question text), `repeat` (`daily` / `weekly` / `monthly`), `emailOptIn` (bool, default false - in-app modal is always on). |
+| `karea_create_reminder` | Schedule a reminder on a task (`task`: visual ID like `KA12` or UUID) or an open question (`question`: short ID like `KAQ12` or UUID); pass exactly one. `fireAt` accepts ISO datetime or friendly forms like `2h`, `3d`, `tomorrow 9am`. Optional `title` (falls back to the task title or the question text), `repeat` (`daily` / `weekly` / `monthly`), `emailOptIn` (bool, default false - in-app modal is always on). |
 | `karea_snooze_reminder` | Snooze by N minutes. |
 | `karea_dismiss_reminder` | Cancel a reminder - it will not fire again. |
 | `karea_mark_reminder_done` | Fulfill a reminder AND close the underlying task (status = done). A reminder on a meeting or a question is just closed. |

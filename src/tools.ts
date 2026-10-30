@@ -86,10 +86,14 @@ function recordFooter(kind: RecordKind, opts: { id?: string | null; displayId?: 
 // hits any karea MCP call is always told about a live reminder. Best-effort;
 // failures never break the primary response. Cached ~10s per-process to keep
 // tight tool-storms cheap.
-let _remCache: { at: number; text: string } | null = null
+// KA1023: keyed by credential. The hosted endpoint serves many users from one
+// process; a single entry showed one user's reminders to the next caller.
+const _remCache = new Map<string, { at: number; text: string }>()
 export async function pendingReminderNudge(): Promise<string> {
   const now = Date.now()
-  if (_remCache && now - _remCache.at < 10_000) return _remCache.text
+  const key = karea.cacheKey()
+  const hit = _remCache.get(key)
+  if (hit && now - hit.at < 10_000) return hit.text
   let text = ''
   try {
     const items = await karea.pendingReminders()
@@ -110,7 +114,8 @@ export async function pendingReminderNudge(): Promise<string> {
       text = lines.join('\n')
     }
   } catch {}
-  _remCache = { at: now, text }
+  if (_remCache.size > 500) _remCache.clear()
+  _remCache.set(key, { at: now, text })
   return text
 }
 
@@ -1115,7 +1120,8 @@ registerTool('karea_create_question', 'Create an open question (a decision or bl
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
   if (!pid) return { content: [{ type: 'text', text: 'Project not found.' }] }
-  const result = await karea.createQuestion({ projectId: pid, question: params.question, markdown: params.markdown, taskIds: params.taskIds })
+  const taskIds = params.taskIds ? await Promise.all(params.taskIds.map((t: string) => resolveTaskId(t, pid))) : undefined
+  const result = await karea.createQuestion({ projectId: pid, question: params.question, markdown: params.markdown, taskIds })
   const parts = [`Question created: "${params.question}"`]
   const base = publicBase()
   const qPrefix = result?.project?.prefix
@@ -1146,11 +1152,14 @@ registerTool('karea_edit_question', 'Edit an open question: change its text, sta
   answer: z.string().optional().describe('Set or update the answer'),
   status: z.string().optional().describe('Change status: open, answered, cancelled'),
   markdown: z.string().optional().describe('Update markdown body'),
-  taskIdsAdd: z.array(z.string()).optional().describe('Task IDs to link'),
-  taskIdsRemove: z.array(z.string()).optional().describe('Task IDs to unlink'),
+  taskIdsAdd: z.array(z.string()).optional().describe('Tasks to link: visual IDs like KA12 or UUIDs'),
+  taskIdsRemove: z.array(z.string()).optional().describe('Tasks to unlink: visual IDs like KA12 or UUIDs'),
   projectId: z.string().optional().describe('Project name or ID - only needed when two of your projects share the short ID\'s prefix.'),
 }, async (params) => {
   const { questionId, projectId, ...data } = params
+  const pid = await resolveProject(projectId)
+  if (data.taskIdsAdd) data.taskIdsAdd = await Promise.all(data.taskIdsAdd.map((t: string) => resolveTaskId(t, pid)))
+  if (data.taskIdsRemove) data.taskIdsRemove = await Promise.all(data.taskIdsRemove.map((t: string) => resolveTaskId(t, pid)))
   await karea.updateQuestion(projectId ? await resolveQuestionId(questionId, projectId) : questionId, data)
   return { content: [{ type: 'text', text: 'Question updated.' }] }
 })
@@ -1887,8 +1896,8 @@ registerTool('karea_create_reminder', 'Schedule a reminder on a task or on an op
 }, async (params) => {
   if (!!params.task === !!params.question) return errorResult('karea_create_reminder needs exactly one of task or question.')
   // KA735: a reminder on an open question rather than a task.
-  const t = params.task ? await karea.getTask(params.task) : null
-  const q = params.question ? await karea.getQuestion(params.question) : null
+  const t = params.task ? await karea.getTask(await resolveTaskId(params.task)) : null
+  const q = params.question ? await karea.getQuestion(await resolveQuestionId(params.question)) : null
   // Accept ISO OR delegate to the app's SLA parser via a shortcut task-edit trick:
   // easier: parse relative forms locally with a light heuristic; ISO passes through.
   let fireIso = params.fireAt
