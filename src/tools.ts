@@ -1962,8 +1962,12 @@ registerTool('karea_mark_reminder_done', 'Fulfill a reminder: closes both the re
 // projects - so `projectId` is an optional association, never a lookup scope.
 
 // Shared renderer so list and view agree on how a meeting reads.
-function meetingLine(m: any): string {
-  const when = m.startAt ? new Date(m.startAt).toISOString().replace('T', ' ').slice(0, 16) : '?'
+// KA1068: in the user's zone, like "Ends:" below. It was UTC, so a 14:15 meeting read 12:15.
+function meetingLine(m: any, tz: string): string {
+  const d = m.startAt ? new Date(m.startAt) : null
+  const when = d && !Number.isNaN(d.getTime())
+    ? `${d.toLocaleDateString('en-CA', { timeZone: tz })} ${d.toLocaleTimeString('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false })}`
+    : '?'
   const proj = m.project?.name ? ` [${m.project.name}]` : ''
   const where = m.location ? ` @ ${m.location}` : ''
   return `${when} - ${m.title}${proj}${where} (id: ${m.id})`
@@ -1984,10 +1988,11 @@ registerTool('karea_list_meetings', 'List meetings. Requires at least one filter
   const data = await karea.listMeetings({ scope: params.scope, from: params.from, to: params.to, projectId: pid, taskId, search: params.search })
   const meetings = data.meetings || []
   if (meetings.length === 0) return { content: [{ type: 'text', text: 'No meetings found.' }] }
+  const tz = await karea.getUserTimezone()
   const lines = meetings.map((m: any) => {
     const qs = (m.questions || []).length
     const extra = qs > 0 ? ` - ${qs} open question(s)` : ''
-    return `- ${meetingLine(m)}${extra}`
+    return `- ${meetingLine(m, tz)}${extra}`
   })
   return { content: [{ type: 'text', text: `Meetings (${meetings.length}):\n${lines.join('\n')}` }] }
 })
@@ -1997,7 +2002,7 @@ registerTool('karea_view_meeting', 'Return one meeting in full: time, location, 
 }, async ({ meetingId }) => {
   const data = await karea.getMeeting(meetingId)
   const m = data.meeting || data
-  const parts = [meetingLine(m)]
+  const parts = [meetingLine(m, await karea.getUserTimezone())]
   if (m.endAt) parts.push(`Ends: ${await whenLocal(m.endAt)}`)
   if (m.description) parts.push(`\nDescription:\n${m.description}`)
   const attendees = Array.isArray(m.attendees) ? m.attendees : []
@@ -2053,7 +2058,7 @@ registerTool('karea_create_meeting', 'Create a meeting. startAt and endAt are RE
     attendees: params.attendees,
   })
   const m = data.meeting || data
-  const parts = [`Meeting "${m.title}" created.`, meetingLine(m), ...recordFooter('meeting', { id: m.id })]
+  const parts = [`Meeting "${m.title}" created.`, meetingLine(m, await karea.getUserTimezone()), ...recordFooter('meeting', { id: m.id })]
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
@@ -2084,7 +2089,7 @@ registerTool('karea_edit_meeting', 'Update a meeting. Only the fields you pass c
   const data = await karea.updateMeeting(params.meetingId, payload)
   const m = data.meeting || data
   const changed = Object.keys(payload).join(', ')
-  return { content: [{ type: 'text', text: [`Meeting updated (${changed}).`, meetingLine(m), ...recordFooter('meeting', { id: m.id })].join('\n') }] }
+  return { content: [{ type: 'text', text: [`Meeting updated (${changed}).`, meetingLine(m, await karea.getUserTimezone()), ...recordFooter('meeting', { id: m.id })].join('\n') }] }
 })
 
 registerTool('karea_delete_meeting', 'Delete a meeting permanently. Linked tasks and open questions are NOT deleted - they outlive the meeting, only the links go. Requires confirm=true.', {
