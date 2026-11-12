@@ -65,7 +65,14 @@ function publicBase(): string {
   }
   return (apiUrl || 'https://karea.app').replace(/\/$/, '')
 }
-function recordFooter(kind: RecordKind, opts: { id?: string | null; displayId?: string | null }): string[] {
+// KA1123: the resource library opens one resource from ?open=<id>; agents get the link ready to paste.
+function resourceLinkLines(r: { id: string; name?: string | null }): string[] {
+  const url = `${publicBase()}/dashboard/resources?open=${r.id}`
+  const lines = [`Link: ${url}`]
+  if (r.name) lines.push(`Markdown link: [${r.name.replace(/([\[\]])/g, '\\$1')}](${url})`)
+  return lines
+}
+function recordFooter(kind: RecordKind, opts: { id?: string | null; displayId?: string | null; name?: string | null }): string[] {
   const lines: string[] = []
   const base = publicBase()
   if (opts.id) lines.push(`ID: ${opts.id}`)
@@ -73,7 +80,7 @@ function recordFooter(kind: RecordKind, opts: { id?: string | null; displayId?: 
   if (opts.id) {
     if (kind === 'task') lines.push(`Link: ${base}/dashboard/task/${opts.id}`)
     else if (kind === 'project') lines.push(`Link: ${base}/dashboard/${opts.id}`)
-    else if (kind === 'resource') lines.push(`Link: ${base}/dashboard/resources`)
+    else if (kind === 'resource') lines.push(...resourceLinkLines({ id: opts.id, name: opts.name }))
     // KA465: the meetings page opens a meeting from an ?open= deep link.
     else if (kind === 'meeting') lines.push(`Link: ${base}/dashboard/meetings?open=${opts.id}`)
   }
@@ -159,7 +166,7 @@ const SLA_FORMS = 'Deadline, in the user\'s timezone: relative (30m, 5h, 2d, 1w)
  * meetings and resources are previewed by UUID only (`/api/mentions/preview`),
  * so the UUID is required there; `[[KAQ3]]` would be read as a task ID.
  */
-const MENTION_SYNTAX = 'To reference another item so it shows as a link with a hover preview (not a plain name): task [[KA12]]; open question [KAQ3](https://karea.app/dashboard/questions?open=<question UUID>); meeting [Title](https://karea.app/dashboard/meetings?open=<meeting UUID>); resource [name](https://karea.app/dashboard/resources?open=<resource UUID>). Use the full https://karea.app URL, so the link still works when the text is copied to Jira or elsewhere. Get UUIDs from the list/view actions (the "ID:" lines).'
+const MENTION_SYNTAX = 'To reference another item so it shows as a link with a hover preview (never a plain name or a bare UUID): task [[KA12]]; open question [KAQ3](https://karea.app/dashboard/questions?open=<question UUID>); meeting [Title](https://karea.app/dashboard/meetings?open=<meeting UUID>); resource [name](https://karea.app/dashboard/resources?open=<resource UUID>). Use the full https://karea.app URL, so the link still works when the text is copied to Jira or elsewhere. Get UUIDs from the list/view actions (the "ID:" lines).'
 
 // KA367: shared session-link params. Any task-referencing tool that accepts
 // these will atomically link the AI session to the target task after the
@@ -184,12 +191,12 @@ async function maybeLinkSession(
       const t = await karea.getTask(taskRef)
       taskId = t.id
     }
-    await karea.linkAISession(taskId, {
+    const linked = await karea.linkAISession(taskId, {
       provider: params.toolType,
       sessionId: params.aiSessionId,
       label: params.sessionLabel,
     })
-    return ` Linked ${params.toolType} session ${params.aiSessionId}.`
+    return (linked as { kind?: string } | null)?.kind === 'connect' ? ` Linked this Karea Connect session to the task.` : ` Linked ${params.toolType} session ${params.aiSessionId}.`
   } catch {
     // Silent - session linking is a convenience, not a hard requirement.
     return null
@@ -1043,7 +1050,7 @@ registerTool('karea_get_markdown', 'Read the markdown document attached to a tas
 // Set task markdown - overwrites the markdown field with the provided content.
 registerTool('karea_set_markdown', 'Write the markdown document for a task. Overwrites any existing content. Use this to persist: investigation findings and research, technical documentation (architecture, APIs, schemas), functional documentation (requirements, acceptance criteria, user flows), root cause analysis and debugging logs, solution design - planned or implemented, risks, trade-offs, and open questions. This is the single source of truth for everything learned about this task. Always append to existing content (read first with karea_get_markdown) rather than replacing it, unless restructuring.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
-  markdown: z.string().describe('The full markdown content to store on the task. Pass empty string to clear.'),
+  markdown: z.string().describe(`The full markdown content to store on the task. Pass empty string to clear. ${MENTION_SYNTAX}`),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
   ...sessionLinkFields,
 }, async (params) => {
@@ -1067,7 +1074,7 @@ registerTool('karea_get_context', 'Read the task\'s Context - titled entries of 
 // Write task Context - upserts a titled entry of the AI scratchpad.
 registerTool('karea_set_context', 'Write a titled entry of the task\'s Context - the AI-facing cross-session working memory. Context tracks the FULL HISTORY of a task, not just its current state: what was tried, what worked, what failed, what was decided and why. Update incrementally so the journey is preserved (never overwrite the whole entry with "current status" - read first with karea_get_context, append/refine, then write back). Context is your DEFAULT save target: after every plan, finding, decision, or gotcha, persist it here proactively under titles like "Plan", "Findings", "Decisions", "Gotchas", "Attempted". Upserts by title: same title overwrites THAT entry only; other entries are untouched. Pass empty context to delete the entry. Use karea_add_note only for human-facing updates and karea_set_markdown for long-form docs - but keep Context up to date either way.', {
   task: z.string().describe('Task name, visual ID (C1, T2), or UUID'),
-  context: z.string().describe('The full content for this entry. Pass empty string to delete the entry.'),
+  context: z.string().describe(`The full content for this entry. Pass empty string to delete the entry. ${MENTION_SYNTAX}`),
   title: z.string().optional().describe('Entry title naming the TOPIC, never a date (e.g. "Plan", "Findings", "Decisions", "Progress", "Loose ends"). Dates go inside the content. Append to an existing entry on the same topic instead of creating a sibling. Defaults to "General".'),
   allowSimilarTitle: z.boolean().optional().describe('Only when a new entry really must sit beside an existing one on the same topic: without it, a title like "Decisions 2026-10-21" next to "Decisions" is refused.'),
   projectId: z.string().optional().describe('Project name or ID (needed for visual ID lookup)'),
@@ -1198,7 +1205,7 @@ registerTool('karea_list_resources', 'List resources (text notes & files). Requi
     const mime = r.mimeType ? ` ${r.mimeType}` : ''
     const created = r.createdAt ? ` created: ${new Date(r.createdAt).toLocaleDateString('en-GB')}` : ''
     const linked = r.taskLinks?.length ? `\n  Linked tasks: ${r.taskLinks.map((l: any) => l.task?.title || l.taskId).join(', ')}` : ''
-    return `${r.type === 'text' ? 'Text' : 'File'} | ${r.name} | ${size}${mime}${folder}${project}${created}\n  ID: ${r.id}${linked}`
+    return `${r.type === 'text' ? 'Text' : 'File'} | ${r.name} | ${size}${mime}${folder}${project}${created}\n  ID: ${r.id}\n  ${resourceLinkLines(r).join('\n  ')}${linked}`
   })
   return { content: [{ type: 'text', text: lines.join('\n\n') }] }
 })
@@ -1214,6 +1221,7 @@ registerTool('karea_get_resource', 'Return a resource with its full content and 
   const resource = await karea.getResource(resourceId)
   const meta: string[] = []
   meta.push(`ID: ${resource.id}`)
+  meta.push(...resourceLinkLines(resource))
   meta.push(`Type: ${resource.type}`)
   if (resource.mimeType) meta.push(`MIME: ${resource.mimeType}`)
   meta.push(`Size: ${resource.sizeBytes} bytes`)
@@ -1273,7 +1281,7 @@ registerTool('karea_create_resource', 'Create a text resource (a note or documen
   const parts = [`Resource "${resource.name}" created.`]
   const linkLine = linkedTaskLine(resource, taskRef)
   if (linkLine) parts.push(linkLine)
-  parts.push(...recordFooter('resource', { id: resource.id }))
+  parts.push(...recordFooter('resource', { id: resource.id, name: resource.name }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
@@ -1290,7 +1298,7 @@ registerTool('karea_update_resource', 'Overwrite a text resource content and/or 
   if (params.folder !== undefined) data.folder = params.folder
   const resource = await karea.updateResource(params.resourceId, data)
   const parts = [`Resource "${resource.name}" updated.`]
-  parts.push(...recordFooter('resource', { id: resource.id }))
+  parts.push(...recordFooter('resource', { id: resource.id, name: resource.name }))
   return { content: [{ type: 'text', text: parts.join('\n') }] }
 })
 
@@ -1339,7 +1347,7 @@ registerTool('karea_upload_resource', 'Upload a file as a resource and return it
     const parts = [`Uploaded "${resource.name}" (${resource.sizeBytes} bytes, ${resourceKind(resource)}).`]
     const linkLine = linkedTaskLine(resource, taskRef)
     if (linkLine) parts.push(linkLine)
-    parts.push(...recordFooter('resource', { id: resource.id }))
+    parts.push(...recordFooter('resource', { id: resource.id, name: resource.name }))
     return { content: [{ type: 'text', text: parts.join('\n') }] }
   } catch (err: any) {
     return { content: [{ type: 'text', text: `Upload failed: ${err.message}` }] }
@@ -1520,6 +1528,7 @@ registerTool('karea_link_session', 'Link your current AI coding session (Claude 
   const pid = await resolveProject(projectId)
   const taskId = await resolveTaskId(task, pid)
   const session = await karea.linkAISession(taskId, { provider, sessionId, label })
+  if ((session as { kind?: string } | null)?.kind === 'connect') return { content: [{ type: 'text', text: `This is a Karea Connect session: linked it to task ${taskId} as a Connect session (it shows on the task and on the Connect page).` }] }
   return { content: [{ type: 'text', text: `Linked ${provider} session ${sessionId} to task ${taskId}.\nRow ID: ${session.id}` }] }
 })
 

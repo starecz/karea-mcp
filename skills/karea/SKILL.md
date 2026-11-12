@@ -98,6 +98,8 @@ Reads go through `karea_read`; changes through `karea_tasks_write` (documents an
 
 Reads go through `karea_read`; changes through `karea_notes_write`; deletes through `karea_delete`.
 
+When a note mentions a resource, write it as a Markdown link, never its name plus a bare UUID: `[spec.md](https://karea.app/dashboard/resources?open=<resource UUID>)`. Resource responses print this line ready to paste (`Markdown link:`). Tasks are `[[KA12]]`; see "Referencing other items" below.
+
 
 | Action | Use for |
 |---|---|
@@ -122,6 +124,8 @@ Reads go through `karea_read`; changes through `karea_meetings_write`; deletes t
 ### Resources
 
 Reads go through `karea_read`; changes through `karea_resources_write`; deletes and unlinks through `karea_delete`.
+
+Every resource response (`karea_create_resource`, `karea_upload_resource`, `karea_update_resource`, `karea_get_resource`, `karea_list_resources`) gives its deep link, `Link: https://karea.app/dashboard/resources?open=<id>`, and a ready `Markdown link: [name](...)`. Paste that Markdown link wherever you mention the resource (notes, descriptions, Context, markdown); a bare id is not clickable.
 
 
 | Action | Use for |
@@ -211,7 +215,7 @@ Link your current AI coding session (Claude Code, OpenCode, Codex, Cursor, Aider
 
 | Action | Use for |
 |---|---|
-| `karea_link_session` | Link the current session: `task`, `provider` (`claude-code` / `opencode` / `codex` / `cursor` / `aider` / `other`), `sessionId`, optional `label`. Call this automatically as soon as the user names the task they're working on (see "Session linking" below). Re-linking the same session refreshes its last-active stamp. |
+| `karea_link_session` | Link the current session: `task`, `provider` (`claude-code` / `opencode` / `codex` / `cursor` / `aider` / `other`), `sessionId`, optional `label`. Call this automatically as soon as the user names the task they're working on (see "Session linking" below). Re-linking the same session refreshes its last-active stamp. Inside a Karea Connect session (Claude Code started from Karea), the id is recognised and the Connect session itself is linked to the task, so it shows on the task and on the Connect page. |
 | `karea_list_sessions` | List AI sessions linked to a task (provider, session id, last active, row id). |
 | `karea_unlink_session` | Remove a linked session by its row id (from `karea_list_sessions`). |
 
