@@ -64,6 +64,12 @@ async function request(path: string, options: RequestInit = {}) {
       const until = body.expiresAt ? ` at the latest until ${body.expiresAt}` : ''
       throw new Error(`Karea is in maintenance (being updated), so changes are paused${until}: ${body.message || 'writes are temporarily disabled'}. Nothing was changed. Reads still work. Retry this same call in a few minutes.`)
     }
+    // KA1140: a user's automation stopped the change, or wants the user to confirm it first.
+    if (body?.error === 'automation') {
+      const name = body.automation?.name ?? 'an automation'
+      if (body.automation?.kind === 'ask') throw new Error(`Needs confirmation by automation "${name}": ${body.message}. Nothing was changed. Ask the user whether to go ahead; the change can only be confirmed in Karea itself.`)
+      throw new Error(`Blocked by automation "${name}": ${body.message}. Nothing was changed.`)
+    }
     throw new Error(body.error || body.response || `API error: ${res.status}`)
   }
 

@@ -111,9 +111,10 @@ export async function pendingReminderNudge(): Promise<string> {
         // A reminder can be on a meeting (KA692) or an open question (KA735) instead of a task.
         const display = r.meeting ? `meeting "${r.meeting.title}"`
           : r.question ? `question ${typeof r.question.seq === 'number' ? `${r.question.project?.prefix ?? ''}Q${r.question.seq}` : `"${r.question.question}"`}`
+          : r.placeholder ? `placeholder "${r.placeholder.title}"`
           : t?.project?.prefix && typeof t?.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t?.id || '').slice(0, 6)}`
         const when = await whenLocal(r.fireAt)
-        const title = r.title || t?.title || r.meeting?.title || r.question?.question || 'Reminder'
+        const title = r.title || t?.title || r.meeting?.title || r.question?.question || r.placeholder?.title || 'Reminder'
         lines.push(`  · [${r.id}] ${display} - ${title} (fires ${when})${r.repeat ? ` [repeat: ${r.repeat}]` : ''}`)
       }
       if (items.length > 5) lines.push(`  … and ${items.length - 5} more.`)
@@ -1119,7 +1120,7 @@ registerTool('karea_list_questions', 'List open questions (unresolved decisions 
 })
 
 // Create open question
-registerTool('karea_create_question', 'Create an open question (a decision or blocker to resolve) in a project, optionally linked to tasks, and return it with its short ID (e.g. KAQ3).', {
+registerTool('karea_create_question', 'Create an open question (a decision or blocker to resolve) in a project, optionally linked to tasks, and return it with its short ID (e.g. KAQ3). Only call this when the user asked for an open question, or said yes after you showed them its exact text in chat; never create one on your own initiative.', {
   question: z.string().describe('The question text'),
   projectId: z.string().optional().describe('Project name or ID'),
   markdown: z.string().optional().describe('Markdown body with additional context'),
@@ -1867,11 +1868,12 @@ function formatReminderLine(r: any, tz = 'UTC'): string {
   // A reminder can be on a meeting (KA692) or an open question (KA735) instead of a task.
   const display = r.meeting ? `meeting "${r.meeting.title}"`
     : r.question ? `question ${typeof r.question.seq === 'number' ? `${r.question.project?.prefix ?? ''}Q${r.question.seq}` : `"${r.question.question}"`}`
+    : r.placeholder ? `placeholder "${r.placeholder.title}"`
     : t.project?.prefix && typeof t.seq === 'number' ? `${t.project.prefix}${t.seq}` : `#${(t.id || '').slice(0, 6)}`
   const when = r.fireAt
     ? new Date(r.fireAt).toLocaleString('en-GB', { timeZone: tz, day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
     : '?'
-  const title = r.title || t.title || r.meeting?.title || r.question?.question || 'Reminder'
+  const title = r.title || t.title || r.meeting?.title || r.question?.question || r.placeholder?.title || 'Reminder'
   const bits = [`[${r.id}] ${display} - ${title} · fires ${when} · status ${r.status}`]
   if (r.repeat) bits.push(`repeat ${r.repeat}`)
   if (r.emailOptIn) bits.push('email on')

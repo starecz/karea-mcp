@@ -346,7 +346,7 @@ Context tracks the **full history** of a task -- what was tried, decided, discov
 3. **Markdown is your scratchpad.** When the user asks you to investigate a bug tied to a task, dump your findings with `karea_set_markdown`. Always read first with `karea_get_markdown` to avoid overwriting existing content.
 4. **Don't invent tasks.** If the user asks about a task that doesn't resolve, say so -- don't guess at a best-match title.
 5. **Notes vs Context vs Markdown -- three different things.** `karea_add_note` = a short, **human-readable** update the user reads (markdown supported). `karea_set_context` = titled entries of **AI working memory** that persist across sessions (Plan, Findings, Decisions, Gotchas) -- your default save target; keep it current proactively (see "Context discipline" above). `karea_set_markdown` = the long-form documentation/knowledge base. Human update -> note; your own cross-session memory -> context (always); long-form docs -> markdown.
-6. **Questions for blockers.** Use `karea_create_question` when the user needs to surface an open question for the team.
+6. **Questions for blockers, only with a yes.** Use `karea_create_question` when the user asks for an open question. If you think one is needed, quote its exact text in chat and ask first; create it only after they agree. Never create one on your own initiative.
 
 ## Example flows
 
