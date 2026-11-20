@@ -115,7 +115,7 @@ Reads go through `karea_read`; changes through `karea_meetings_write`; deletes t
 
 | Action | Use for |
 |---|---|
-| `karea_create_question` | Create an open question on a project. Accepts an optional `markdown` body (long-form context) and `taskIds` to pre-link tasks (visual IDs or UUIDs). |
+| `karea_create_question` | Create an open question on a project. Accepts an optional `markdown` body (long-form context) and `taskIds` to pre-link tasks (visual IDs or UUIDs). Pass `meeting` (a meeting UUID, or words of its title: `"daily"` means today's occurrence in the user's time zone; `meetingDate` / `meetingTime` narrow it) to put the question on that meeting in the same call: when the user already named the meeting, do not ask which one. An ambiguous name creates nothing and lists the candidates. |
 | `karea_edit_question` | Update a question. Editable: `question`, `answer`, `status` (`open` / `answered` / `cancelled`), `markdown`. Link tasks with `taskIdsAdd`, unlink with `taskIdsRemove` (visual IDs like `KA12` or UUIDs). |
 | `karea_answer_question` | Answer a question (also flips status to `answered`). Accepts the question's short ID (e.g. `KAQ3`) or UUID. |
 | `karea_edit_question` / `karea_delete_question` | Edit or delete a question by its short ID (e.g. `KAQ3`) or UUID. |
@@ -176,6 +176,8 @@ spans projects - `projectId` is an optional filing, not ownership.
 | `karea_delete_meeting` | Destructive. Confirm first. |
 | `karea_link_task_to_meeting` / `karea_unlink_task_from_meeting` | Put a task on the agenda, or take it off. Unlinking keeps both. |
 | `karea_link_question_to_meeting` / `karea_unlink_question_from_meeting` | Same, for an open question the user wants to raise there (short ID like `KAQ3` or UUID). Linking a question also links its tasks to the meeting; linking a task never brings its questions. Unlinking does not cascade. |
+
+Meeting times are printed in the user's time zone with its name (`2026-11-18 09:30 Europe/Madrid`): repeat them as they are, never convert them.
 
 Two things worth knowing when you read a meeting back:
 

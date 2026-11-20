@@ -1125,12 +1125,16 @@ registerTool('karea_create_question', 'Create an open question (a decision or bl
   projectId: z.string().optional().describe('Project name or ID'),
   markdown: z.string().optional().describe('Markdown body with additional context'),
   taskIds: z.array(z.string()).optional().describe('Task IDs to link (visual IDs like KA12 or UUIDs)'),
+  meeting: z.string().optional().describe('Put the question on this meeting: its UUID, or words of its title ("daily", "standup"). A title with no meetingDate means today\'s occurrence, in the user\'s time zone. When the user already named the meeting ("link it to today\'s daily"), pass it here and do not ask them which meeting.'),
+  meetingDate: z.string().optional().describe('Day of the meeting, YYYY-MM-DD in the user\'s time zone. Only with a title in `meeting`, when it is not today.'),
+  meetingTime: z.string().optional().describe('Start time of the meeting, "HH:MM" (24h, user\'s time zone) or "4pm". Only to tell apart two meetings with the same title on the same day.'),
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
   if (!pid) return { content: [{ type: 'text', text: 'Project not found.' }] }
   const taskIds = params.taskIds ? await Promise.all(params.taskIds.map((t: string) => resolveTaskId(t, pid))) : undefined
-  const result = await karea.createQuestion({ projectId: pid, question: params.question, markdown: params.markdown, taskIds })
+  const result = await karea.createQuestion({ projectId: pid, question: params.question, markdown: params.markdown, taskIds, meeting: params.meeting, meetingDate: params.meetingDate, meetingTime: params.meetingTime })
   const parts = [`Question created: "${params.question}"`]
+  if (result?.meeting) parts.push(`On meeting: "${result.meeting.title}" ${result.meeting.local} ${result.meeting.timezone} (id: ${result.meeting.id})`)
   const base = publicBase()
   const qPrefix = result?.project?.prefix
   const qShort = result?.seq != null ? (qPrefix ? `${qPrefix}Q${result.seq}` : `Q${result.seq}`) : null
@@ -1981,7 +1985,7 @@ function meetingLine(m: any, tz: string): string {
     : '?'
   const proj = m.project?.name ? ` [${m.project.name}]` : ''
   const where = m.location ? ` @ ${m.location}` : ''
-  return `${when} - ${m.title}${proj}${where} (id: ${m.id})`
+  return `${when}${d ? ` ${tz}` : ''} - ${m.title}${proj}${where} (id: ${m.id})`
 }
 
 registerTool('karea_list_meetings', 'List meetings. Requires at least one filter: scope ("upcoming" = ends in the future, "past" = already ended), a from/to date window, projectId, task or search (a call with none is refused). Filters combine. Meetings belong to the user, not to a project - projectId only filters those explicitly filed under it. Read-only.', {

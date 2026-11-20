@@ -251,7 +251,7 @@ export async function listQuestions(opts: { projectId?: string; status?: string;
   return request(`/api/questions?${params}`)
 }
 
-export async function createQuestion(data: { projectId: string; question: string; markdown?: string; taskIds?: string[] }) {
+export async function createQuestion(data: { projectId: string; question: string; markdown?: string; taskIds?: string[]; meeting?: string; meetingDate?: string; meetingTime?: string }) {
   return request('/api/questions', { method: 'POST', body: JSON.stringify(data) })
 }
 
