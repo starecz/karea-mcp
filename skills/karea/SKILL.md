@@ -115,7 +115,7 @@ Reads go through `karea_read`; changes through `karea_meetings_write`; deletes t
 
 | Action | Use for |
 |---|---|
-| `karea_create_question` | Create an open question on a project. Accepts an optional `markdown` body (long-form context) and `taskIds` to pre-link tasks (visual IDs or UUIDs). Pass `meeting` (a meeting UUID, or words of its title: `"daily"` means today's occurrence in the user's time zone; `meetingDate` / `meetingTime` narrow it) to put the question on that meeting in the same call: when the user already named the meeting, do not ask which one. An ambiguous name creates nothing and lists the candidates. |
+| `karea_create_question` | Create an open question on a project. Accepts an optional `markdown` body (long-form context) and `taskIds` to pre-link tasks (visual IDs or UUIDs). Pass `meeting` (a meeting UUID, or words of its title: `"daily"` means today's occurrence in the user's time zone; `meetingDate` / `meetingTime` narrow it) to put the question on that meeting in the same call: when the user already named the meeting, do not ask which one; when they did not, ask before creating it (the next few upcoming meetings from `karea_list_meetings` plus "No meeting"). If they did not say which project and it is not clear from the task at hand, ask that too instead of picking one. An ambiguous name creates nothing and lists the candidates. |
 | `karea_edit_question` | Update a question. Editable: `question`, `answer`, `status` (`open` / `answered` / `cancelled`), `markdown`. Link tasks with `taskIdsAdd`, unlink with `taskIdsRemove` (visual IDs like `KA12` or UUIDs). |
 | `karea_answer_question` | Answer a question (also flips status to `answered`). Accepts the question's short ID (e.g. `KAQ3`) or UUID. |
 | `karea_edit_question` / `karea_delete_question` | Edit or delete a question by its short ID (e.g. `KAQ3`) or UUID. |
@@ -348,7 +348,7 @@ Context tracks the **full history** of a task -- what was tried, decided, discov
 3. **Markdown is your scratchpad.** When the user asks you to investigate a bug tied to a task, dump your findings with `karea_set_markdown`. Always read first with `karea_get_markdown` to avoid overwriting existing content.
 4. **Don't invent tasks.** If the user asks about a task that doesn't resolve, say so -- don't guess at a best-match title.
 5. **Notes vs Context vs Markdown -- three different things.** `karea_add_note` = a short, **human-readable** update the user reads (markdown supported). `karea_set_context` = titled entries of **AI working memory** that persist across sessions (Plan, Findings, Decisions, Gotchas) -- your default save target; keep it current proactively (see "Context discipline" above). `karea_set_markdown` = the long-form documentation/knowledge base. Human update -> note; your own cross-session memory -> context (always); long-form docs -> markdown.
-6. **Questions for blockers, only with a yes.** Use `karea_create_question` when the user asks for an open question. If you think one is needed, quote its exact text in chat and ask first; create it only after they agree. Never create one on your own initiative.
+6. **Questions for blockers, only with a yes.** Use `karea_create_question` when the user asks for an open question. If you think one is needed, quote its exact text in chat and ask first; create it only after they agree. Never create one on your own initiative. Before creating it, ask which meeting to put it on (unless they named one) and which project (unless it is clear); never guess either.
 
 ## Example flows
 

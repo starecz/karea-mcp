@@ -1122,15 +1122,15 @@ registerTool('karea_list_questions', 'List open questions (unresolved decisions 
 // Create open question
 registerTool('karea_create_question', 'Create an open question (a decision or blocker to resolve) in a project, optionally linked to tasks, and return it with its short ID (e.g. KAQ3). Only call this when the user asked for an open question, or said yes after you showed them its exact text in chat; never create one on your own initiative.', {
   question: z.string().describe('The question text'),
-  projectId: z.string().optional().describe('Project name or ID'),
+  projectId: z.string().optional().describe('Project name or ID. Required. If the user did not say which project and it is not clear from the task they are on, ask them (karea_list_projects) instead of picking one.'),
   markdown: z.string().optional().describe('Markdown body with additional context'),
   taskIds: z.array(z.string()).optional().describe('Task IDs to link (visual IDs like KA12 or UUIDs)'),
-  meeting: z.string().optional().describe('Put the question on this meeting: its UUID, or words of its title ("daily", "standup"). A title with no meetingDate means today\'s occurrence, in the user\'s time zone. When the user already named the meeting ("link it to today\'s daily"), pass it here and do not ask them which meeting.'),
+  meeting: z.string().optional().describe('Put the question on this meeting: its UUID, or words of its title ("daily", "standup"). A title with no meetingDate means today\'s occurrence, in the user\'s time zone. When the user already named the meeting ("link it to today\'s daily"), pass it here and do not ask them which meeting. When they did not, ask them before calling: list the next few upcoming meetings (karea_list_meetings scope upcoming) plus "No meeting", and pass their pick here (nothing for No meeting).'),
   meetingDate: z.string().optional().describe('Day of the meeting, YYYY-MM-DD in the user\'s time zone. Only with a title in `meeting`, when it is not today.'),
   meetingTime: z.string().optional().describe('Start time of the meeting, "HH:MM" (24h, user\'s time zone) or "4pm". Only to tell apart two meetings with the same title on the same day.'),
 }, async (params) => {
   const pid = await resolveProject(params.projectId)
-  if (!pid) return { content: [{ type: 'text', text: 'Project not found.' }] }
+  if (!pid) return { content: [{ type: 'text', text: params.projectId ? `Project "${params.projectId}" not found. Ask the user which project, from karea_list_projects.` : 'A question needs a project. Ask the user which project (karea_list_projects) and pass it as projectId; do not pick one yourself.' }] }
   const taskIds = params.taskIds ? await Promise.all(params.taskIds.map((t: string) => resolveTaskId(t, pid))) : undefined
   const result = await karea.createQuestion({ projectId: pid, question: params.question, markdown: params.markdown, taskIds, meeting: params.meeting, meetingDate: params.meetingDate, meetingTime: params.meetingTime })
   const parts = [`Question created: "${params.question}"`]
