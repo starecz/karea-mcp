@@ -290,6 +290,8 @@ Link: https://karea.app/dashboard/task/<uuid>
 
 When you report back to the user, **include the Link** so they can click straight through. Don't replace it with the raw UUID and don't strip it.
 
+**In chat, every Karea item you mention is a link (KA1210).** A task, open question, meeting, resource or project named in your reply is written as a Markdown link to it (`[KA123 Fix login](https://karea.app/dashboard/task/<uuid>)`, `[KAQ3](https://karea.app/dashboard/questions?open=<uuid>)`), never a bare ID or title. No UUID at hand: look the item up before replying.
+
 ## Conventions the user expects
 
 - **Task IDs**: prefer per-project IDs like `HA123` when the project has a prefix, else the short visual ID like `C1` / `T2`. Never paste a UUID to the user unless they ask.
